@@ -18,9 +18,9 @@ class Elodb:
 		try:
 			open(self.dbfile)
 			con = sqlite3.connect(self.dbfile)
-			print "\""+self.dbfile+"\" found :)"
+			print("\""+self.dbfile+"\" found :)")
 		except IOError:
-			print "\""+self.dbfile+"\" not found, making a new one"
+			print("\""+self.dbfile+"\" not found, making a new one")
 			con = sqlite3.connect(self.dbfile)
 			c = con.cursor()
 			c.execute('''create table Item
@@ -30,8 +30,7 @@ class Elodb:
 			con.close()
 
 	def filehash(self, filepath):
-		f = open(filepath)
-
+		f = open(filepath, 'rb')
 		m = hashlib.md5()
 		m.update(f.read())
 
@@ -101,7 +100,7 @@ class Elodb:
 		con.close()
 
 		fields = ['hash', 'path', 'rating']
-		result = [dict(zip(fields, row)) for row in result]
+		result = [dict(list(zip(fields, row))) for row in result]
 		return result
 
 	def sql(self, query):
@@ -130,44 +129,11 @@ class Itemcollection:
 		self.itemstack = self.items[:]
 		random.shuffle(self.itemstack)
 
-	def next(self):
+	def __next__(self):
 		if not self.itemstack:
 			self.shuffle()
 
 		return self.itemstack.pop()
-
-
-template = '''
-<html>
-<head>
-	<script language="javascript" type="text/javascript">
-		document.onkeyup = KeyPressed;
-
-		function KeyPressed( e ) {
-			var key = ( window.event ) ? event.keyCode : e.keyCode;
-
-			switch( key ) {
-				case 37: //left
-					window.location.href="/?a=%(im1)s&b=%(im2)s&result=1"
-					break;
-				case 39: //right
-					window.location.href="/?a=%(im2)s&b=%(im1)s&result=1"
-					break;
-			}
-		}
-	</script>
-</head>
-<body>
-	<a href="/?a=%(im1)s&b=%(im2)s&result=1"><img src="static/%(im1)s" width="49%%"></a>
-	<a href="/?a=%(im2)s&b=%(im1)s&result=1"><img src="static/%(im2)s" width="49%%"></a>
-	<div width="49%%"" style="float:left ;text-align:center;"><a href="static/%(im1)s">View Fullsize</a></div>
-	<div width="49%%"" style="float:right;text-align:center;"><a href="static/%(im2)s">View Fullsize</a></div>
-
-	<p align="center"><a href="/results">See Results</a></p>
-</body>
-</html>
-'''
-
 
 class Elosort:
 	def __init__(self, db, items):
@@ -181,12 +147,67 @@ class Elosort:
 			else:
 				return "Invalid value for result"
 
-		vars = {
-			"im1" : self.items.next(),
-			"im2" : self.items.next()
-		}
+		im1 = next(self.items)
+		im2 = next(self.items)
 
-		return template % vars
+		template = f'''
+		<html>
+		<head>
+			<script language="javascript" type="text/javascript">
+				document.onkeyup = KeyPressed;
+				function KeyPressed( e ) {{
+					var key = ( window.event ) ? event.keyCode : e.keyCode;
+
+					switch( key ) {{
+						case 37: //left
+							window.location.href="/?a={im1}&b={im2}&result=1"
+							break;
+						case 39: //right
+							window.location.href="/?a={im2}&b={im1}&result=1"
+							break;
+					}}
+				}}
+			</script>
+			<style>
+				body {{
+					margin: 0;
+					display: flex;
+					flex-direction: column;
+					align-items: center;
+					height: 100vh;
+				}}
+				.image-container {{
+					display: flex;
+					justify-content: center;
+					align-items: center;
+					text-align: center; /* Example text alignment */
+					width: 100%;
+				}}
+				.image-container img {{
+					width: 50%; /* Each image takes up half the width */
+					height: auto; /* Maintain aspect ratio */
+					object-fit: contain; /* Ensures the image is fully visible */
+				}}
+				.full-width-container {{
+					width: 100%; /* Full width of the page */
+					background-color: #f0f0f0; /* Just an example background color */
+					text-align: center; /* Example text alignment */
+					padding: 20px; /* Example padding */
+				}}
+			</style>
+		</head>
+		<body>
+			<div class="image-container">
+				<a href="/?a={im1}&b={im2}&result=1"><img src="static/{im1}"></a>
+				<a href="/?a={im2}&b={im1}&result=1"><img src="static/{im2}"></a>
+			</div>
+			<div class="full-width-container">
+				<p align="center"><a href="/results">See Results</a></p>
+			</div>
+		</body>
+		</html>
+		'''
+		return template
 
 	index.exposed = True
 
@@ -253,3 +274,4 @@ if __name__ == "__main__":
 			}
 
 	cherrypy.quickstart(Elosort(db, itemcollection), "/", config=conf)
+
