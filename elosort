@@ -92,10 +92,12 @@ class Elodb:
 		c = con.cursor()
 		c.execute('''SELECT * from Item ORDER BY rating DESC''')
 
-		if start:
-			c.fetchmany(start)
-
-		result = c.fetchmany(count)
+		if start == None and count == None:
+			result = c.fetchall()
+		else:
+			if start:
+				c.fetchmany(start)
+			result = c.fetchmany(count)
 		c.close()
 		con.close()
 
@@ -203,6 +205,7 @@ class Elosort:
 			</div>
 			<div class="full-width-container">
 				<p align="center"><a href="/results">See Results</a></p>
+				<p align="center"><a href="/">Punt</a></p>
 			</div>
 		</body>
 		</html>
@@ -223,7 +226,21 @@ class Elosort:
 		self.db.setrating(a, newarating)
 		self.db.setrating(b, newbrating)
 
-	def results(self, start=0, count=10):
+	def script(self, count=20):
+		count = int(count)
+		results = self.db.getresults(None, None)
+		to_delete = results[count:]
+		value = '<html>\n<body>\n<pre>\n'
+		for item in to_delete:
+			value += f"rm {os.path.basename(item['path'])} # {item['rating']}\n"
+		value += '</pre>\n'
+		value += '<p><a href="/">Continue Rating</a></p>\n'
+		value += '</body></html>'
+		return value
+	
+	script.exposed = True
+
+	def results(self, start=0, count=20):
 		start = int(start)
 		count = int(count)
 
