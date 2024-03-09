@@ -8,32 +8,28 @@ import hashlib
 import glob
 import random
 
-
 STARTRATING = 1000
 
-
-class Elodb:
+class ELODB:
 	def __init__(self, dbfile):
 		self.dbfile = dbfile
 		try:
 			open(self.dbfile)
 			con = sqlite3.connect(self.dbfile)
-			print("\""+self.dbfile+"\" found :)")
+			print(f'{self.dbfile} found :)')
 		except IOError:
-			print("\""+self.dbfile+"\" not found, making a new one")
+			print(f'{self.dbfile} not found, making a new one')
 			con = sqlite3.connect(self.dbfile)
 			c = con.cursor()
-			c.execute('''create table Item
-						(hash text PRIMARY_KEY, path text, rating integer)''')
+			c.execute('create table Item (hash text PRIMARY_KEY, path text, rating integer)')
 			con.commit()
 			c.close()
 			con.close()
 
 	def filehash(self, filepath):
-		f = open(filepath, 'rb')
-		m = hashlib.md5()
-		m.update(f.read())
-
+		with open(filepath, 'rb') as f:
+			m = hashlib.sha256()
+			m.update(f.read())
 		return m.hexdigest()
 
 	def getrating(self, filepath):
@@ -43,12 +39,9 @@ class Elodb:
 		If the file isn't already in the db, add it with the starting rating
 		"""
 		filehash = self.filehash(filepath)
-
 		con = sqlite3.connect(self.dbfile)
 		c = con.cursor()
-		c.execute('''SELECT rating from Item
-						where hash = ?''', (filehash,))
-
+		c.execute('SELECT rating from Item where hash = ?', (filehash,))
 		result = c.fetchone()
 		c.close()
 		con.close()
@@ -62,13 +55,9 @@ class Elodb:
 
 	def setrating(self, filepath, newrating):
 		filehash = self.filehash(filepath)
-
 		con = sqlite3.connect(self.dbfile)
 		c = con.cursor()
-		c.execute("""UPDATE Item
-					SET path = ?, rating = ? WHERE hash = ?""",
-					(filepath, newrating, filehash))
-
+		c.execute('UPDATE Item SET path = ?, rating = ? WHERE hash = ?', (filepath, newrating, filehash))
 		con.commit()
 		c.close()
 		con.close()
@@ -77,12 +66,9 @@ class Elodb:
 		"""Add a new file to the db, with the starting rating"""
 		filehash = self.filehash(filepath)
 		abspath = os.path.abspath(filepath)
-
 		con = sqlite3.connect(self.dbfile)
 		c = con.cursor()
-		c.execute('''INSERT into Item values (?, ?, ?)''',
-					(filehash, abspath, STARTRATING))
-
+		c.execute('INSERT into Item values (?, ?, ?)', (filehash, abspath, STARTRATING))
 		con.commit()
 		c.close()
 		con.close()
@@ -90,37 +76,23 @@ class Elodb:
 	def getresults(self, start=0, count=10):
 		con = sqlite3.connect(self.dbfile)
 		c = con.cursor()
-		c.execute('''SELECT * from Item ORDER BY rating DESC''')
 
-		if start == None and count == None:
-			result = c.fetchall()
+		sql_query = 'SELECT * from Item ORDER BY rating DESC'
+		if count not in [0, None]:
+			sql_query += f' LIMIT {int(count)}'
 		else:
-			if start:
-				c.fetchmany(start)
-			result = c.fetchmany(count)
+			sql_query += ' LIMIT -1'
+		if start not in [0, None]:
+			sql_query += f' OFFSET {int(start)}'
+
+		c.execute(sql_query)
+		results = c.fetchall()
 		c.close()
 		con.close()
 
 		fields = ['hash', 'path', 'rating']
-		result = [dict(list(zip(fields, row))) for row in result]
-		return result
-
-	def sql(self, query):
-		"""
-		Run an SQL Query on the database
-
-		Mostly used for testing and provisional features
-		"""
-
-		con = sqlite3.connect(self.dbfile)
-		c = con.cursor()
-		c.execute(query)
-
-		result = c.fetchall()
-		c.close()
-		con.close()
-
-		return result
+		results = [dict(zip(fields, row)) for row in results]
+		return results
 
 class Itemcollection:
 	def __init__(self, items):
@@ -134,7 +106,6 @@ class Itemcollection:
 	def __next__(self):
 		if not self.itemstack:
 			self.shuffle()
-
 		return self.itemstack.pop()
 
 class Elosort:
@@ -142,12 +113,18 @@ class Elosort:
 		self.db = db
 		self.items = items
 
+	def menu_div(self, tag = 'Punt'):
+		return f'''
+			<div class="full-width-container">
+				<p align="center"><a href="/results">See Results</a> - <a href="/">{tag}</a> - <a href="/script">Purge</a></p>
+			</div>'''
+
 	def index(self, a=None, b=None, result=None):
 		if a and b and result:
 			if result in ("0", "1", "0.5"):
 				self.match(a, b, float(result))
 			else:
-				return "Invalid value for result"
+				return 'Invalid value for result'
 
 		im1 = next(self.items)
 		im2 = next(self.items)
@@ -186,7 +163,7 @@ class Elosort:
 					width: 100%;
 				}}
 				.image-container img {{
-					width: 50%; /* Each image takes up half the width */
+					width: 48%; /* Each image takes up half the width */
 					height: auto; /* Maintain aspect ratio */
 					object-fit: contain; /* Ensures the image is fully visible */
 				}}
@@ -194,18 +171,15 @@ class Elosort:
 					width: 100%; /* Full width of the page */
 					background-color: #f0f0f0; /* Just an example background color */
 					text-align: center; /* Example text alignment */
-					padding: 20px; /* Example padding */
+					padding: 10px; /* Example padding */
 				}}
 			</style>
 		</head>
 		<body>
+			{self.menu_div('Punt')}
 			<div class="image-container">
 				<a href="/?a={im1}&b={im2}&result=1"><img src="static/{im1}"></a>
 				<a href="/?a={im2}&b={im1}&result=1"><img src="static/{im2}"></a>
-			</div>
-			<div class="full-width-container">
-				<p align="center"><a href="/results">See Results</a></p>
-				<p align="center"><a href="/">Punt</a></p>
 			</div>
 		</body>
 		</html>
@@ -226,69 +200,142 @@ class Elosort:
 		self.db.setrating(a, newarating)
 		self.db.setrating(b, newbrating)
 
-	def script(self, count=20):
-		count = int(count)
-		results = self.db.getresults(None, None)
-		to_delete = results[count:]
-		value = '<html>\n<body>\n<pre>\n'
-		for item in to_delete:
-			value += f"rm {os.path.basename(item['path'])} # {item['rating']}\n"
-		value += '</pre>\n'
-		value += '<p><a href="/">Continue Rating</a></p>\n'
-		value += '</body></html>'
-		return value
+	def script(self, offset=20):
+		offset = int(offset)
+		results = self.db.getresults(start = offset, count = 0)
+		commands = '\n'.join([f'rm {os.path.basename(item["path"])} # {item["rating"]}' for item in results])		
+		template = f'''
+		<html>
+		<head>
+			<style>
+				body {{
+					margin: 0;
+					display: flex;
+					flex-direction: column;
+					align-items: center;
+					height: 100vh;
+				}}
+				.code-block {{
+					width: 100%; /* Full width of the page */
+					background-color: #d0d0d0; /* Just an example background color */
+					padding: 20px; /* Example padding */
+				}}	
+				.full-width-container {{
+					width: 100%; /* Full width of the page */
+					background-color: #f0f0f0; /* Just an example background color */
+					text-align: center; /* Example text alignment */
+					padding: 10px; /* Example padding */
+				}}
+			</style>
+		</head>
+		<body>
+			{self.menu_div('Return to Scoring')}
+			<div class="code-block">
+				<pre>{commands}</pre>
+			</div>
+		</body>
+		</html>
+		'''
+		return template
 	
 	script.exposed = True
 
-	def results(self, start=0, count=20):
-		start = int(start)
-		count = int(count)
+	def results(self, start=0, count=0):
+		start = max(0, int(start))
+		count = max(0, int(count))
 
-		litemplate = """<li>
-							<a href='static/%(path)s'>
-								<img src='static/%(path)s' width='100'></a>
-							%(rating)f
-						</li>"""
+		results = self.db.getresults(start, count)
+		if count == 0:
+			count = len(results)
 
-		resultstemplate = "<p><a href='/'>Continue Rating</a></p><ol>%s</ol><a href='?start="+str(start+count)+"'>Next</a>"
+		print(results[0])
+		gallery_items = [ f'<div class="gallery-item"><img src="static/{x["path"]}"><div class="score">Score: {x["rating"]:.3f}</div></div>' for x in results]
+		gallery_string = '\n'.join(gallery_items)
 
-		return resultstemplate % "\n".join([litemplate % i for i in self.db.getresults(start, count)])
-
+		template = f'''<!DOCTYPE html>
+			<html>
+			<head>
+				<style>
+					body {{
+						font-family: 'Arial', sans-serif;
+						background-color: #f4f4f4;
+						color: #333;
+						margin: 0;
+						padding: 20px;
+						line-height: 1.6;
+					}}
+					.gallery {{
+						display: grid;
+						grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+						grid-gap: 20px;
+						padding: 20px;
+					}}
+					.gallery-item {{
+						display: flex;
+						flex-direction: column;
+						align-items: center;
+						background-color: #fff;
+						border: 1px solid #ddd;
+						padding: 15px;
+						border-radius: 5px;
+						box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+					}}
+					.gallery-item img {{
+						width: 100%;
+						height: auto;
+						object-fit: cover;
+						border-radius: 5px;
+					}}
+					.score {{
+						margin-top: 10px;
+						font-size: 18px;
+						color: #007bff;
+					}}
+					.full-width-container {{
+						width: 100%; /* Full width of the page */
+						background-color: #f0f0f0; /* Just an example background color */
+						text-align: center; /* Example text alignment */
+						padding: 10px; /* Example padding */
+					}}
+				</style>
+			</head>
+			<body>
+				{self.menu_div('Continue Rating')}
+				<div class="gallery">
+					{gallery_string}
+				</div>
+				<div class="full-width-container">
+					<p><a href='?start={int(start-count)}&count={count}'>Back</a> / <a href='?start={int(start+count)}&count={count}'>Forwards</a></p>
+				</div>
+			</body>
+			</html>
+			'''
+		return template
+	
 	results.exposed = True
 
 if __name__ == "__main__":
 
 	parser = OptionParser()
-	parser.add_option("--dbname", dest="dbname", default=".elosortdb.sql3",
-					help="Name of rating database file", metavar="NAME")
-	parser.add_option("--filetypes", dest="filetypes", default="jpg,png,gif",
-					help="comma separated list of file extensions", metavar="LIST")
-	parser.add_option("--port", dest="port", default=8080, type="int",
-					help="Port to run the server on", metavar="PORTNUM")
-
+	parser.add_option("--dbname", dest="dbname", default=".elosortdb.sql3",	help="Name of rating database file", metavar="NAME")
+	parser.add_option("--filetypes", dest="filetypes", default="jpg,png,gif", help="comma separated list of file extensions", metavar="LIST")
+	parser.add_option("--port", dest="port", default=8080, type="int", help="Port to run the server on", metavar="PORTNUM")
 	(opts, args) = parser.parse_args()
-
 	if args:
 		basedir = args[0]
 	else:
 		basedir = "."
-
 	basedir = os.path.abspath(basedir)
-
 	dbfilename = os.path.join(basedir, opts.dbname)
-	db = Elodb(dbfilename)
-
+	db = ELODB(dbfilename)
 	filetypes = opts.filetypes.split(",")
 	items = []
 	for filetype in filetypes:
 		items += glob.glob(os.path.join(basedir, "*."+filetype))
 	itemcollection = Itemcollection(items)
-
-	conf = {'global': {'server.socket_port': opts.port},
-			'/static': {'tools.staticdir.on': True,
-						'tools.staticdir.dir': "/"
-						}
-			}
-
+	conf = {
+		'global': {'server.socket_port': opts.port},
+		'/static': {'tools.staticdir.on': True,	'tools.staticdir.dir': "/"}
+	}
 	cherrypy.quickstart(Elosort(db, itemcollection), "/", config=conf)
 
