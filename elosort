@@ -10,74 +10,70 @@ import random
 
 STARTRATING = 1000
 
-class ELODB:
+class ELO_DB:
 	def __init__(self, dbfile):
 		self.dbfile = dbfile
-		try:
-			open(self.dbfile)
-			con = sqlite3.connect(self.dbfile)
-			print(f'{self.dbfile} found :)')
-		except IOError:
-			print(f'{self.dbfile} not found, making a new one')
-			con = sqlite3.connect(self.dbfile)
-			c = con.cursor()
-			c.execute('create table Item (hash text PRIMARY_KEY, path text, rating integer)')
-			con.commit()
-			c.close()
-			con.close()
+		if not os.path.isfile(self.dbfile):
+			cherrypy.log(f'{self.dbfile} not found, making a new one')
+			try:
+				connection = sqlite3.connect(self.dbfile)
+				with connection:
+					connection.execute('CREATE TABLE Item (hash TEXT PRIMARY_KEY, path TEXT, rating INTEGER)')
+			except(sqlite3.OperationalError, sqlite3.IntegrityError, IOError) as e:
+				cherrypy.log(f'could not create a new table in {self.dbfile}', traceback = True)
+				raise
+			connection.close()
+		else:
+			cherrypy.log(f'{self.dbfile} found :)')
 
-	def filehash(self, filepath):
+	def get_file_hash(self, filepath):
 		with open(filepath, 'rb') as f:
-			m = hashlib.sha256()
-			m.update(f.read())
-		return m.hexdigest()
+			hash_object = hashlib.sha256()
+			hash_object.update(f.read())
+		return hash_object.hexdigest()
 
-	def getrating(self, filepath):
+	def get_file_rating(self, filepath, createrating = True):
 		"""
-		Get the Elo rating for a given file.
+		Get the ELO rating for a given file.
 
-		If the file isn't already in the db, add it with the starting rating
+		If the file isn't already in the db, add it with the starting rating if createrating is True
 		"""
-		filehash = self.filehash(filepath)
-		con = sqlite3.connect(self.dbfile)
-		c = con.cursor()
-		c.execute('SELECT rating from Item where hash = ?', (filehash,))
-		result = c.fetchone()
-		c.close()
-		con.close()
+		file_hash = self.get_file_hash(filepath)
+
+		try:
+			connection = sqlite3.connect(self.dbfile)
+			with connection:
+				cursor = connection.execute('SELECT rating FROM Item WHERE hash = ?', (file_hash,))
+				result = cursor.fetchone()
+		except(sqlite3.OperationalError, sqlite3.IntegrityError, IOError) as e:
+			cherrypy.log(f'error reading ratings from database file {self.dbfile}', traceback = True)
 
 		if result:
-			rating = result[0]
-			return rating
-		else:
-			self.initrating(filepath)
+			return result[0]
+		elif createrating:
+			self.create_file_rating(filepath)
 			return STARTRATING
+		else:
+			return None
 
-	def setrating(self, filepath, newrating):
-		filehash = self.filehash(filepath)
-		con = sqlite3.connect(self.dbfile)
-		c = con.cursor()
-		c.execute('UPDATE Item SET path = ?, rating = ? WHERE hash = ?', (filepath, newrating, filehash))
-		con.commit()
-		c.close()
-		con.close()
+	def set_file_rating(self, filepath, newrating):
+		file_hash = self.get_file_hash(filepath)
+		connection = sqlite3.connect(self.dbfile)
+		with connection:
+			connection.execute('UPDATE Item SET path = ?, rating = ? WHERE hash = ?', (filepath, newrating, file_hash))
+		connection.close()
 
-	def initrating(self, filepath):
+	def create_file_rating(self, filepath):
 		"""Add a new file to the db, with the starting rating"""
-		filehash = self.filehash(filepath)
+		file_hash = self.get_file_hash(filepath)
 		abspath = os.path.abspath(filepath)
-		con = sqlite3.connect(self.dbfile)
-		c = con.cursor()
-		c.execute('INSERT into Item values (?, ?, ?)', (filehash, abspath, STARTRATING))
-		con.commit()
-		c.close()
-		con.close()
+		connection = sqlite3.connect(self.dbfile)
+		with connection:
+			connection.execute('INSERT INTO Item VALUES (?, ?, ?)', (file_hash, abspath, STARTRATING))
+		connection.close()
 
-	def getresults(self, start=0, count=10):
-		con = sqlite3.connect(self.dbfile)
-		c = con.cursor()
-
-		sql_query = 'SELECT * from Item ORDER BY rating DESC'
+	def get_all_ratings(self, start=0, count=10):
+		sql_query = 'SELECT * FROM Item ORDER BY rating DESC'
 		if count not in [0, None]:
 			sql_query += f' LIMIT {int(count)}'
 		else:
@@ -85,45 +81,57 @@ class ELODB:
 		if start not in [0, None]:
 			sql_query += f' OFFSET {int(start)}'
 
-		c.execute(sql_query)
-		results = c.fetchall()
-		c.close()
-		con.close()
+		connection = sqlite3.connect(self.dbfile)
+		with connection:
+			cursor = connection.execute(sql_query)
+		rows = cursor.fetchall()
+		connection.close()
 
-		fields = ['hash', 'path', 'rating']
-		results = [dict(zip(fields, row)) for row in results]
-		return results
+		return [dict(zip(['hash', 'path', 'rating'], row)) for row in rows]
 
-class Itemcollection:
+class Depletable_Stack:
 	def __init__(self, items):
-		self.items = items
+		self._permanent_items = items
 		self.shuffle()
 
 	def shuffle(self):
-		self.itemstack = self.items[:]
-		random.shuffle(self.itemstack)
+		cherrypy.log(f'reshuffling, {len(self._permanent_items)} items entering the stack')
+		self._temporary_stack = self._permanent_items[:]
+		random.shuffle(self._temporary_stack)
 
 	def __next__(self):
-		if not self.itemstack:
+		if not self._temporary_stack:
 			self.shuffle()
-		return self.itemstack.pop()
+		return self._temporary_stack.pop()
 
-class Elosort:
-	def __init__(self, db, items):
+class ELO_Sort:
+	def __init__(self, db: ELO_DB, items: Depletable_Stack):
 		self.db = db
 		self.items = items
 
+	def score_match(self, a, b, result):
+		k = 16
+		a_rating = self.db.get_file_rating(a)
+		b_rating = self.db.get_file_rating(b)
+		expected = 1 / (1 + (10 ** ((b_rating - a_rating) / 400.)))
+
+		new_a_rating = a_rating + (k * (result - expected))
+		new_b_rating = b_rating - (k * (result - expected))
+
+		self.db.set_file_rating(a, new_a_rating)
+		self.db.set_file_rating(b, new_b_rating)
+
 	def menu_div(self, tag = 'Punt'):
 		return f'''
-			<div class="full-width-container">
-				<p align="center"><a href="/results">See Results</a> - <a href="/">{tag}</a> - <a href="/script">Purge</a></p>
-			</div>'''
+<div class="full-width-container">
+	<p align="center"><a href="/results">See Results</a> - <a href="/">{tag}</a> - <a href="/script">Purge</a></p>
+</div>'''
 
 	@cherrypy.expose 
 	def index(self, a=None, b=None, result=None):
 		if a and b and result:
 			if result in ("0", "1", "0.5"):
-				self.match(a, b, float(result))
+				self.score_match(a, b, float(result))
 			else:
 				return 'Invalid value for result'
 
@@ -131,67 +139,60 @@ class Elosort:
 		im2 = next(self.items)
 
 		template = f'''<!DOCTYPE html>
-		<html>
-		<head>
-			<link rel="stylesheet" href="/stylesheet" type="text/css">
-			<script language="javascript" type="text/javascript">
-				document.onkeyup = KeyPressed;
-				function KeyPressed( e ) {{
-					var key = ( window.event ) ? event.keyCode : e.keyCode;
+<html>
+<head>
+	<link rel="stylesheet" href="/stylesheet" type="text/css">
+	<script language="javascript" type="text/javascript">
+		document.onkeyup = KeyPressed;
+		function KeyPressed( e ) {{
+			var key = ( window.event ) ? event.keyCode : e.keyCode;
 
-					switch( key ) {{
-						case 37: //left
-							window.location.href="/?a={im1}&b={im2}&result=1"
-							break;
-						case 39: //right
-							window.location.href="/?a={im2}&b={im1}&result=1"
-							break;
-					}}
-				}}
-			</script>
-		</head>
-		<body>
-			{self.menu_div('Punt')}
-			<div class="twoup">
-				<div class="gallery-item"><a href="/?a={im1}&b={im2}&result=1"><img src="static/{im1}"></a></div>
-				<div class="gallery-item"><a href="/?a={im2}&b={im1}&result=1"><img src="static/{im2}"></a></div>
-			</div>
-		</body>
-		</html>
-		'''
+			switch( key ) {{
+				case 37: //left
+					window.location.href="/?a={im1}&b={im2}&result=1"
+					break;
+				case 38: //up
+					window.location.href="/"
+					break;
+				case 39: //right
+					window.location.href="/?a={im2}&b={im1}&result=1"
+					break;
+				case 40: //down
+					window.location.href="/results"
+					break;
+			}}
+		}}
+	</script>
+</head>
+<body>
+	{self.menu_div('Punt')}
+	<div class="twoup">
+		<div class="gallery-item"><a href="/?a={im1}&b={im2}&result=1"><img src="static/{im1}"></a></div>
+		<div class="gallery-item"><a href="/?a={im2}&b={im1}&result=1"><img src="static/{im2}"></a></div>
+	</div>
+</body>
+</html>
+'''
 		return template
-
-
-	def match(self, a, b, result):
-		k = 16
-		arating = self.db.getrating(a)
-		brating = self.db.getrating(b)
-		expected = 1 / (1 + (10 ** ((brating - arating) / 400.)))
-
-		newarating = arating + (k * (result - expected))
-		newbrating = brating - (k * (result - expected))
-
-		self.db.setrating(a, newarating)
-		self.db.setrating(b, newbrating)
 
 	@cherrypy.expose
 	def script(self, offset=20):
 		offset = int(offset)
-		results = self.db.getresults(start = offset, count = 0)
+		results = self.db.get_all_ratings(start = offset, count = 0)
 		commands = '\n'.join([f'rm {os.path.basename(item["path"])} # {item["rating"]}' for item in results])		
 		template = f'''<!DOCTYPE html>
-		<html>
-		<head>
-			<link rel="stylesheet" href="/stylesheet" type="text/css">
-		</head>
-		<body>
-			{self.menu_div('Return to Scoring')}
-			<div class="code-block">
-				<pre>{commands}</pre>
-			</div>
-		</body>
-		</html>
-		'''
+<html>
+<head>
+	<link rel="stylesheet" href="/stylesheet" type="text/css">
+</head>
+<body>
+	{self.menu_div('Return to Scoring')}
+	<div class="code-block">
+		<pre>{commands}</pre>
+	</div>
+</body>
+</html>
+'''
 		return template
 	
 	@cherrypy.expose
@@ -207,14 +208,22 @@ class Elosort:
 	height: 100vh;
 	line-height: 1.6;
 	margin: 0;
+	overflow-x: hidden;
 	padding: 20px;
 }
 
 .twoup {
-	align-items: center;
 	display: flex;
 	justify-content: center;
 	width: 100%;
+}
+
+.twoup img {
+	border-radius: 5px;
+	height: 100%;
+	max-height: 80vh;
+	object-fit: contain;
+	width: auto;
 }
 
 .gallery {
@@ -253,7 +262,7 @@ gallery-item div.score {
 	background-color: #f0f0f0;
 	padding: 10px;
 	text-align: center;
-	width: 98%;
+	width: 100%;
 }
 
 .code-block {
@@ -263,36 +272,34 @@ gallery-item div.score {
 }	
 '''
 
-
 	@cherrypy.expose
 	def results(self, start=0, count=0):
 		start = max(0, int(start))
 		count = max(0, int(count))
 
-		results = self.db.getresults(start, count)
+		results = self.db.get_all_ratings(start, count)
 		if count == 0:
 			count = len(results)
 
-		print(results[0])
 		gallery_items = [ f'<div class="gallery-item"><img src="static/{x["path"]}"><div class="score">Score: {x["rating"]:.3f}</div></div>' for x in results]
 		gallery_string = '\n'.join(gallery_items)
 
 		template = f'''<!DOCTYPE html>
-			<html>
-			<head>
-				<link rel="stylesheet" href="/stylesheet" type="text/css">
-			</head>
-			<body>
-				{self.menu_div('Continue Rating')}
-				<div class="gallery">
-					{gallery_string}
-				</div>
-				<div class="full-width-container">
-					<p><a href='?start={int(start-count)}&count={count}'>Back</a> / <a href='?start={int(start+count)}&count={count}'>Forwards</a></p>
-				</div>
-			</body>
-			</html>
-			'''
+<html>
+<head>
+	<link rel="stylesheet" href="/stylesheet" type="text/css">
+</head>
+<body>
+	{self.menu_div('Continue Rating')}
+	<div class="gallery">
+		{gallery_string}
+	</div>
+	<div class="full-width-container">
+		<p><a href='?start={int(start-count)}&count={count}'>Back</a> / <a href='?start={int(start+count)}&count={count}'>Forwards</a></p>
+	</div>
+</body>
+</html>
+'''
 		return template
 	
 if __name__ == "__main__":
@@ -307,15 +314,24 @@ if __name__ == "__main__":
 		basedir = "."
 	basedir = os.path.abspath(basedir)
 	dbfilename = os.path.join(basedir, opts.dbname)
-	db = ELODB(dbfilename)
+	db = ELO_DB(dbfilename)
 	filetypes = opts.filetypes.split(",")
 	items = []
 	for filetype in filetypes:
-		items += glob.glob(os.path.join(basedir, "*."+filetype))
-	itemcollection = Itemcollection(items)
-	conf = {
-		'global': {'server.socket_port': opts.port},
-		'/static': {'tools.staticdir.on': True,	'tools.staticdir.dir': "/"}
+		items += glob.glob(os.path.join(basedir, f'*.{filetype}'))
+	itemcollection = Depletable_Stack(items)
+
+	cherry_config = {
+		'global': {
+			'server.socket_port': opts.port, 
+			'log.screen': False,
+			'log.access_file': '/dev/null',
+			'log.error_file': '/dev/stdout',
+		},
+		'/static': {
+			'tools.staticdir.on': True,	
+			'tools.staticdir.dir': "/"
+		},
 	}
-	cherrypy.quickstart(Elosort(db, itemcollection), "/", config=conf)
+	cherrypy.quickstart(ELO_Sort(db, itemcollection), "/", config = cherry_config)
 
