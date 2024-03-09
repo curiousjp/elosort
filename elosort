@@ -184,11 +184,22 @@ class ELO_Sort:
 <html>
 <head>
 	<link rel="stylesheet" href="/stylesheet" type="text/css">
+	<script language="javascript" type="text/javascript">
+		function selectText(element) {{
+			if(window.getSelection) {{
+				const selection = window.getSelection();
+				const range = document.createRange();
+				range.selectNodeContents(element);
+				selection.removeAllRanges();
+				selection.addRange(range)
+			}}
+		}}
+	</script>
 </head>
 <body>
 	{self.menu_div('Return to Scoring')}
 	<div class="code-block">
-		<pre>{commands}</pre>
+		<pre onclick="selectText(this)">{commands}</pre>
 	</div>
 </body>
 </html>
