@@ -119,6 +119,7 @@ class Elosort:
 				<p align="center"><a href="/results">See Results</a> - <a href="/">{tag}</a> - <a href="/script">Purge</a></p>
 			</div>'''
 
+	@cherrypy.expose 
 	def index(self, a=None, b=None, result=None):
 		if a and b and result:
 			if result in ("0", "1", "0.5"):
@@ -129,9 +130,10 @@ class Elosort:
 		im1 = next(self.items)
 		im2 = next(self.items)
 
-		template = f'''
+		template = f'''<!DOCTYPE html>
 		<html>
 		<head>
+			<link rel="stylesheet" href="/stylesheet" type="text/css">
 			<script language="javascript" type="text/javascript">
 				document.onkeyup = KeyPressed;
 				function KeyPressed( e ) {{
@@ -147,46 +149,18 @@ class Elosort:
 					}}
 				}}
 			</script>
-			<style>
-				body {{
-					margin: 0;
-					display: flex;
-					flex-direction: column;
-					align-items: center;
-					height: 100vh;
-				}}
-				.image-container {{
-					display: flex;
-					justify-content: center;
-					align-items: center;
-					text-align: center; /* Example text alignment */
-					width: 100%;
-				}}
-				.image-container img {{
-					width: 48%; /* Each image takes up half the width */
-					height: auto; /* Maintain aspect ratio */
-					object-fit: contain; /* Ensures the image is fully visible */
-				}}
-				.full-width-container {{
-					width: 100%; /* Full width of the page */
-					background-color: #f0f0f0; /* Just an example background color */
-					text-align: center; /* Example text alignment */
-					padding: 10px; /* Example padding */
-				}}
-			</style>
 		</head>
 		<body>
 			{self.menu_div('Punt')}
-			<div class="image-container">
-				<a href="/?a={im1}&b={im2}&result=1"><img src="static/{im1}"></a>
-				<a href="/?a={im2}&b={im1}&result=1"><img src="static/{im2}"></a>
+			<div class="twoup">
+				<div class="gallery-item"><a href="/?a={im1}&b={im2}&result=1"><img src="static/{im1}"></a></div>
+				<div class="gallery-item"><a href="/?a={im2}&b={im1}&result=1"><img src="static/{im2}"></a></div>
 			</div>
 		</body>
 		</html>
 		'''
 		return template
 
-	index.exposed = True
 
 	def match(self, a, b, result):
 		k = 16
@@ -200,33 +174,15 @@ class Elosort:
 		self.db.setrating(a, newarating)
 		self.db.setrating(b, newbrating)
 
+	@cherrypy.expose
 	def script(self, offset=20):
 		offset = int(offset)
 		results = self.db.getresults(start = offset, count = 0)
 		commands = '\n'.join([f'rm {os.path.basename(item["path"])} # {item["rating"]}' for item in results])		
-		template = f'''
+		template = f'''<!DOCTYPE html>
 		<html>
 		<head>
-			<style>
-				body {{
-					margin: 0;
-					display: flex;
-					flex-direction: column;
-					align-items: center;
-					height: 100vh;
-				}}
-				.code-block {{
-					width: 100%; /* Full width of the page */
-					background-color: #d0d0d0; /* Just an example background color */
-					padding: 20px; /* Example padding */
-				}}	
-				.full-width-container {{
-					width: 100%; /* Full width of the page */
-					background-color: #f0f0f0; /* Just an example background color */
-					text-align: center; /* Example text alignment */
-					padding: 10px; /* Example padding */
-				}}
-			</style>
+			<link rel="stylesheet" href="/stylesheet" type="text/css">
 		</head>
 		<body>
 			{self.menu_div('Return to Scoring')}
@@ -238,8 +194,77 @@ class Elosort:
 		'''
 		return template
 	
-	script.exposed = True
+	@cherrypy.expose
+	def stylesheet(self):
+		cherrypy.response.headers['Content-Type'] = 'text/css'
+		return '''body {
+	align-items: center;
+	background-color: #f4f4f4;
+	color: #333;
+	display: flex;
+	flex-direction: column;
+	font-family: 'Arial', sans-serif;
+	height: 100vh;
+	line-height: 1.6;
+	margin: 0;
+	padding: 20px;
+}
 
+.twoup {
+	align-items: center;
+	display: flex;
+	justify-content: center;
+	width: 100%;
+}
+
+.gallery {
+	display: grid;
+	grid-gap: 20px;
+	grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+	padding: 20px;
+	width: 100%;
+}
+
+.gallery-item {
+	background-color: #fff;
+	border: 1px solid #ddd;
+	border-radius: 5px;
+	box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	padding: 15px;
+}
+
+.gallery-item img {
+	border-radius: 5px;
+	height: auto;
+	object-fit: cover;
+	width: 100%;
+}
+
+gallery-item div.score {
+	color: #007bff;
+	font-size: 18px;
+	margin-top: 10px;
+}
+
+.full-width-container {
+	background-color: #f0f0f0;
+	padding: 10px;
+	text-align: center;
+	width: 98%;
+}
+
+.code-block {
+	background-color: #d0d0d0;
+	padding: 10px;
+	width: 98%;
+}	
+'''
+
+
+	@cherrypy.expose
 	def results(self, start=0, count=0):
 		start = max(0, int(start))
 		count = max(0, int(count))
@@ -255,49 +280,7 @@ class Elosort:
 		template = f'''<!DOCTYPE html>
 			<html>
 			<head>
-				<style>
-					body {{
-						font-family: 'Arial', sans-serif;
-						background-color: #f4f4f4;
-						color: #333;
-						margin: 0;
-						padding: 20px;
-						line-height: 1.6;
-					}}
-					.gallery {{
-						display: grid;
-						grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-						grid-gap: 20px;
-						padding: 20px;
-					}}
-					.gallery-item {{
-						display: flex;
-						flex-direction: column;
-						align-items: center;
-						background-color: #fff;
-						border: 1px solid #ddd;
-						padding: 15px;
-						border-radius: 5px;
-						box-shadow: 0 5px 15px rgba(0,0,0,0.1);
-					}}
-					.gallery-item img {{
-						width: 100%;
-						height: auto;
-						object-fit: cover;
-						border-radius: 5px;
-					}}
-					.score {{
-						margin-top: 10px;
-						font-size: 18px;
-						color: #007bff;
-					}}
-					.full-width-container {{
-						width: 100%; /* Full width of the page */
-						background-color: #f0f0f0; /* Just an example background color */
-						text-align: center; /* Example text alignment */
-						padding: 10px; /* Example padding */
-					}}
-				</style>
+				<link rel="stylesheet" href="/stylesheet" type="text/css">
 			</head>
 			<body>
 				{self.menu_div('Continue Rating')}
@@ -312,10 +295,7 @@ class Elosort:
 			'''
 		return template
 	
-	results.exposed = True
-
 if __name__ == "__main__":
-
 	parser = OptionParser()
 	parser.add_option("--dbname", dest="dbname", default=".elosortdb.sql3",	help="Name of rating database file", metavar="NAME")
 	parser.add_option("--filetypes", dest="filetypes", default="jpg,png,gif", help="comma separated list of file extensions", metavar="LIST")
