@@ -72,7 +72,7 @@ class ELO_DB:
 			connection.execute('INSERT INTO Item VALUES (?, ?, ?)', (file_hash, abspath, STARTRATING))
 		connection.close()
 
-	def get_all_ratings(self, start=0, count=10):
+	def get_all_ratings(self, start=0, count=10, filter = None):
 		sql_query = 'SELECT * FROM Item ORDER BY rating DESC'
 		if count not in [0, None]:
 			sql_query += f' LIMIT {int(count)}'
@@ -80,14 +80,16 @@ class ELO_DB:
 			sql_query += ' LIMIT -1'
 		if start not in [0, None]:
 			sql_query += f' OFFSET {int(start)}'
-
 		connection = sqlite3.connect(self.dbfile)
 		with connection:
 			cursor = connection.execute(sql_query)
-		rows = cursor.fetchall()
+		rows = [dict(zip(['hash', 'path', 'rating'], row)) for row in cursor.fetchall()]
 		connection.close()
-
-		return [dict(zip(['hash', 'path', 'rating'], row)) for row in rows]
+		# really, there should be a more proactive approach to knocking out 'dead' 
+		# records in the database, but I see the databases as kind of ephemeral
+		if filter:
+			rows = [row for row in rows if row['path'] in filter]
+		return rows
 
 class Depletable_Stack:
 	def __init__(self, items):
@@ -98,6 +100,9 @@ class Depletable_Stack:
 		cherrypy.log(f'reshuffling, {len(self._permanent_items)} items entering the stack')
 		self._temporary_stack = self._permanent_items[:]
 		random.shuffle(self._temporary_stack)
+	
+	def known_items(self):
+		return self._permanent_items[:]
 
 	def __next__(self):
 		if not self._temporary_stack:
@@ -178,7 +183,7 @@ class ELO_Sort:
 	@cherrypy.expose
 	def script(self, offset=20):
 		offset = int(offset)
-		results = self.db.get_all_ratings(start = offset, count = 0)
+		results = self.db.get_all_ratings(start = offset, count = 0, filter = self.items.known_items())
 		commands = '\n'.join([f'rm {os.path.basename(item["path"])} # {item["rating"]}' for item in results])		
 		template = f'''<!DOCTYPE html>
 <html>
@@ -200,6 +205,36 @@ class ELO_Sort:
 	{self.menu_div('Return to Scoring')}
 	<div class="code-block">
 		<pre onclick="selectText(this)">{commands}</pre>
+	</div>
+</body>
+</html>
+'''
+		return template
+	
+	@cherrypy.expose
+	def results(self, start=0, count=0):
+		start = max(0, int(start))
+		count = max(0, int(count))
+
+		results = self.db.get_all_ratings(start, count, filter = self.items.known_items())
+		if count == 0:
+			count = len(results)
+
+		gallery_items = [ f'<div class="gallery-item"><img src="static/{x["path"]}"><div class="score">Score: {x["rating"]:.3f}</div></div>' for x in results]
+		gallery_string = '\n'.join(gallery_items)
+
+		template = f'''<!DOCTYPE html>
+<html>
+<head>
+	<link rel="stylesheet" href="/stylesheet" type="text/css">
+</head>
+<body>
+	{self.menu_div('Continue Rating')}
+	<div class="gallery">
+		{gallery_string}
+	</div>
+	<div class="full-width-container">
+		<p><a href='?start={int(start-count)}&count={count}'>Back</a> / <a href='?start={int(start+count)}&count={count}'>Forwards</a></p>
 	</div>
 </body>
 </html>
@@ -283,40 +318,10 @@ gallery-item div.score {
 }	
 '''
 
-	@cherrypy.expose
-	def results(self, start=0, count=0):
-		start = max(0, int(start))
-		count = max(0, int(count))
-
-		results = self.db.get_all_ratings(start, count)
-		if count == 0:
-			count = len(results)
-
-		gallery_items = [ f'<div class="gallery-item"><img src="static/{x["path"]}"><div class="score">Score: {x["rating"]:.3f}</div></div>' for x in results]
-		gallery_string = '\n'.join(gallery_items)
-
-		template = f'''<!DOCTYPE html>
-<html>
-<head>
-	<link rel="stylesheet" href="/stylesheet" type="text/css">
-</head>
-<body>
-	{self.menu_div('Continue Rating')}
-	<div class="gallery">
-		{gallery_string}
-	</div>
-	<div class="full-width-container">
-		<p><a href='?start={int(start-count)}&count={count}'>Back</a> / <a href='?start={int(start+count)}&count={count}'>Forwards</a></p>
-	</div>
-</body>
-</html>
-'''
-		return template
-	
 if __name__ == "__main__":
 	parser = OptionParser()
 	parser.add_option("--dbname", dest="dbname", default=".elosortdb.sql3",	help="Name of rating database file", metavar="NAME")
-	parser.add_option("--filetypes", dest="filetypes", default="jpg,png,gif", help="comma separated list of file extensions", metavar="LIST")
+	parser.add_option("--filetypes", dest="filetypes", default="jpg,png,gif", help="Comma separated list of file extensions", metavar="LIST")
 	parser.add_option("--port", dest="port", default=8080, type="int", help="Port to run the server on", metavar="PORTNUM")
 	(opts, args) = parser.parse_args()
 	if args:
