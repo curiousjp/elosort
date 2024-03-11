@@ -100,7 +100,10 @@ class Depletable_Stack:
 		cherrypy.log(f'reshuffling, {len(self._permanent_items)} items entering the stack')
 		self._temporary_stack = self._permanent_items[:]
 		random.shuffle(self._temporary_stack)
-	
+
+	def stack_remaining(self):
+		return len(self._temporary_stack)
+
 	def known_items(self):
 		return self._permanent_items[:]
 
@@ -129,7 +132,7 @@ class ELO_Sort:
 	def menu_div(self, tag = 'Punt'):
 		return f'''
 <div class="full-width-container">
-	<p align="center"><a href="/results">See Results</a> - <a href="/">{tag}</a> - <a href="/script">Purge</a></p>
+	<p align="center"><a href="/results">See Results</a> - <a href="/">{tag}</a> - <a href="/script">Purge</a> - {self.items.stack_remaining()} remaining</p>
 </div>'''
 
 	@cherrypy.expose 
