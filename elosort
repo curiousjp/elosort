@@ -96,55 +96,93 @@ class Depletable_Stack:
 		self._permanent_items = items
 		self.shuffle()
 
+	def _rebalance_stack(self):
+		# make up a pair if the stack is odd sized
+		if len(self._temporary_stack) % 2 == 1:
+			cherrypy.log(f'adding bonus item to rebalance stack')
+			self._temporary_stack.append(random.choice(self._permanent_items[:]))
+
 	def shuffle(self):
 		cherrypy.log(f'reshuffling, {len(self._permanent_items)} items entering the stack')
 		self._temporary_stack = self._permanent_items[:]
 		random.shuffle(self._temporary_stack)
+		self._rebalance_stack()
 
 	def stack_remaining(self):
 		return len(self._temporary_stack)
 
 	def known_items(self):
 		return self._permanent_items[:]
-
-	def __next__(self):
-		if not self._temporary_stack:
+	
+	def peek(self):
+		if len(self._temporary_stack) == 0:
 			self.shuffle()
-		return self._temporary_stack.pop()
+		self._rebalance_stack()
+		return tuple(self._temporary_stack[0:2])
+	
+	def dequeue(self, item):
+		if item in self._temporary_stack:
+			self._temporary_stack.remove(item)
 
 class ELO_Sort:
 	def __init__(self, db: ELO_DB, items: Depletable_Stack):
 		self.db = db
 		self.items = items
 
-	def score_match(self, a, b, result):
-		k = 16
+	def score_match(self, a, b, result_a, k = 16):
+		"""The 'result' here is the result for player A."""
+
+		if a == b:
+			self.items.dequeue(a)
+			return
+
 		a_rating = self.db.get_file_rating(a)
 		b_rating = self.db.get_file_rating(b)
-		expected = 1 / (1 + (10 ** ((b_rating - a_rating) / 400.)))
 
-		new_a_rating = a_rating + (k * (result - expected))
-		new_b_rating = b_rating - (k * (result - expected))
+		if result_a == 1:
+			a_score, b_score = 1.0, 0.0
+		elif result_a == 0:
+			a_score, b_score = 0.0, 1.0
+		else:
+			a_score, b_score = 0.5, 0.5
+		
+		a_expected = 1.0 / (1.0 + (10.0 ** ((b_rating - a_rating) / 400.0)))
+		b_expected = 1.0 / (1.0 + (10.0 ** ((a_rating - b_rating) / 400.0)))
+
+		new_a_rating = a_rating + k * (a_score - a_expected)
+		new_b_rating = b_rating + k * (b_score - b_expected)
+
+		# print(f'elo: a: rating: {a_rating}, score: {a_score}, expected: {a_expected}, new: {new_a_rating}')
+		# print(f'elo: b: rating: {b_rating}, score: {b_score}, expected: {b_expected}, new: {new_b_rating}')
 
 		self.db.set_file_rating(a, new_a_rating)
+		self.items.dequeue(a)
 		self.db.set_file_rating(b, new_b_rating)
+		self.items.dequeue(b)
 
-	def menu_div(self, tag = 'Punt'):
+	def menu_div(self, tag = 'Clean URL and Continue Rating'):
 		return f'''
 <div class="full-width-container">
 	<p align="center"><a href="/results">See Results</a> - <a href="/">{tag}</a> - <a href="/script">Purge</a> - {self.items.stack_remaining()} remaining</p>
 </div>'''
 
 	@cherrypy.expose 
-	def index(self, a=None, b=None, result=None):
+	def index(self, a = None, b = None, result = None, force_im1 = None, force_im2 = None):
 		if a and b and result:
-			if result in ("0", "1", "0.5"):
-				self.score_match(a, b, float(result))
-			else:
-				return 'Invalid value for result'
+			try:
+				result_value = float(result)
+				if result_value not in [0.0, 0.5, 1.0]:
+					raise ValueError('result must be 0.0, 0.5, or 1.0')
+				self.score_match(a, b, result_value)
+			except ValueError as ve:
+				return f'ValueError: {repr(ve)}'
 
-		im1 = next(self.items)
-		im2 = next(self.items)
+		# we can now peek safely as the item is not dequeued until it is voted on
+		im1, im2 = self.items.peek()
+		if force_im1:
+			im1 = force_im1
+		if force_im2:
+			im2 = force_im2
 
 		template = f'''<!DOCTYPE html>
 <html>
@@ -157,13 +195,13 @@ class ELO_Sort:
 
 			switch( key ) {{
 				case 37: //left
-					window.location.href="/?a={im1}&b={im2}&result=1"
+					window.location.href="/?a={im1}&b={im2}&result=1.0"
 					break;
 				case 38: //up
-					window.location.href="/"
+					window.location.href="/?a={im1}&b={im2}&result=0.5"
 					break;
 				case 39: //right
-					window.location.href="/?a={im2}&b={im1}&result=1"
+					window.location.href="/?a={im2}&b={im1}&result=1.0"
 					break;
 				case 40: //down
 					window.location.href="/results"
@@ -207,6 +245,7 @@ class ELO_Sort:
 <body>
 	{self.menu_div('Return to Scoring')}
 	<div class="code-block">
+		<pre># you can call this page with different ?offset= arguments to preserve more files from deletion.</pre>
 		<pre onclick="selectText(this)">{commands}</pre>
 	</div>
 </body>
@@ -223,16 +262,76 @@ class ELO_Sort:
 		if count == 0:
 			count = len(results)
 
-		gallery_items = [ f'<div class="gallery-item"><img src="static/{x["path"]}"><div class="score">Score: {x["rating"]:.3f}</div></div>' for x in results]
+		gallery_items = [ f'<div class="gallery-item"><img data-path="{x["path"]}" src="static/{x["path"]}"><div class="score">Score: {x["rating"]:.3f}</div></div>' for x in results]
 		gallery_string = '\n'.join(gallery_items)
 
 		template = f'''<!DOCTYPE html>
 <html>
 <head>
 	<link rel="stylesheet" href="/stylesheet" type="text/css">
+	<style>
+		.highlighted {{
+			border: 2px solid purple;
+		}}
+	</style>
+	<script language="javascript" type="text/javascript">
+		document.addEventListener('DOMContentLoaded', () => {{
+			const divs = document.querySelectorAll('div.gallery-item');
+			const link = document.getElementById('contestLink')
+
+			link.removeAttribute('href');
+			link.style.pointerEvents = 'none';
+			link.style.opacity = 0.5;
+
+			let highlighted = [];
+
+			divs.forEach(div => {{
+				div.addEventListener('click', () => {{
+					// Add or remove highlight from the clicked div
+					div.classList.toggle('highlighted');
+					// Update the array of highlighted divs
+					if(div.classList.contains('highlighted')) {{
+						highlighted.push(div);
+					}} else {{
+						highlighted = highlighted.filter(h => h !== div);
+					}}
+					// If more than two divs are highlighted, unhighlight the oldest one
+					if(highlighted.length > 2) {{
+						highlighted[0].classList.remove('highlighted');
+						highlighted.shift();
+					}}
+					// If exactly two divs are highlighted, enable the matchup link
+					if(highlighted.length == 2) {{
+						const first_image = highlighted[0].querySelector('img');
+						const second_image = highlighted[1].querySelector('img');
+						let first_item = first_image.dataset.path;
+						let second_item = second_image.dataset.path;
+
+						if(first_item.startsWith('static/')) {{
+							first_item = first_item.slice(7);
+						}}
+						if(second_item.startsWith('static/')) {{
+							second_item = second_item.slice(7);
+						}}
+
+						link.href = '/?force_im1=' + first_item + '&force_im2=' + second_item;
+						link.style.pointerEvents = 'auto';
+						link.style.opacity = 1;
+					}} else {{
+						link.removeAttribute('href');
+						link.style.pointerEvents = 'none';
+						link.style.opacity = 0.5;
+					}}
+				}});
+			}});
+		}});
+	</script>
 </head>
 <body>
 	{self.menu_div('Continue Rating')}
+	<div class="full-width-container">
+		<a id="contestLink" href="/">Force Matchup between Clicked Items</a>
+	</div>
 	<div class="gallery">
 		{gallery_string}
 	</div>
@@ -309,7 +408,7 @@ gallery-item div.score {
 
 .full-width-container {
 	background-color: #f0f0f0;
-	padding: 10px;
+	padding: 5px;
 	text-align: center;
 	width: 100%;
 }

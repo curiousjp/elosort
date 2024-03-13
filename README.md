@@ -7,7 +7,8 @@
 This fork has some minor modifications to bring it up to compatibility with Python3, make some small improvements in line with what I think current best practice is, and to add a few features I find personally useful. The most significant of these are:
 * Output has been styled with a built-in stylesheet. 
 * An endpoint, `/script`, has been created to provide you with a pasteable set of Unix commands to remove all but the top-*n* rated images (by default, 20). You can click on the script block to select it for copying and pasting.
-* On the main rating page, the up arrow key will "punt" or jump to the next two images without rating (a clickable link for this is also present in the top menu), and the down arrow key will take you to the results screen. 
+* The stack is now rebalanced with a randomly chosen item when it is reshuffled or when a peek is attempted with insufficient items remaining (possible if an item somehow ends up being matched against itself on a degenerately small stack).
+* On the main rating page, the up arrow key will now register a draw, and the down arrow key will take you to the results screen. Viewing the index no longer "consumes" items of the stack to be rated, this only happens when a result is submitted.
 * The results screen, by default, is no longer paginated and will dump all the images in the dataset to your screen at once.
 
 I have unfortunately introduced a number of linuxisms to this fork - references to `/dev/stdout` and `/dev/null`, use of `rm` in the script, removal of `\r\n` linebreaks, etc. I feel a little bad about this, but suggest running the script inside of WSL if this is a problem for your environment.
