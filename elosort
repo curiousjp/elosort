@@ -433,10 +433,10 @@ if __name__ == "__main__":
 	basedir = os.path.abspath(basedir)
 	dbfilename = os.path.join(basedir, opts.dbname)
 	db = ELO_DB(dbfilename)
-	filetypes = opts.filetypes.split(",")
-	items = []
-	for filetype in filetypes:
-		items += glob.glob(os.path.join(basedir, f'*.{filetype}'))
+	filetypes = ['.'+x.strip() for x in opts.filetypes.split(",")]
+	# glob could be a lot better
+	everything = glob.glob(os.path.join(basedir, '**'), recursive=True)
+	items = [x for x in everything if os.path.splitext(x)[1] in filetypes]
 	itemcollection = Depletable_Stack(items)
 
 	cherry_config = {
