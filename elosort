@@ -26,6 +26,24 @@ class ELO_DB:
 		else:
 			cherrypy.log(f'{self.dbfile} found :)')
 
+	def clean_db(self):
+		# testing for bad hashes (i.e. changed files) is in the too
+		# hard basket at the moment, but I do need to get to it someday
+		bad_filepaths = []
+		current_records = self.get_all_ratings()
+		for item in current_records:
+			if not os.path.exists(item['path']):
+				bad_filepaths.append((item['path'],))
+		if not bad_filepaths:
+			return
+		cherrypy.log(f'attempting to clean db of {len(bad_filepaths)} entries')
+		try:
+			connection = sqlite3.connect(self.dbfile)
+			with connection:
+				cursor = connection.executemany('DELETE FROM Item WHERE path = ?', bad_filepaths)
+		except(sqlite3.OperationalError, sqlite3.IntegrityError, IOError) as e:
+			cherrypy.log(f'error deleting items from database file {self.dbfile}, bad_filepaths was {bad_filepaths}', traceback = True)
+
 	def get_file_hash(self, filepath):
 		with open(filepath, 'rb') as f:
 			hash_object = hashlib.sha256()
@@ -38,7 +56,12 @@ class ELO_DB:
 
 		If the file isn't already in the db, add it with the starting rating if createrating is True
 		"""
-		file_hash = self.get_file_hash(filepath)
+		try:
+			file_hash = self.get_file_hash(filepath)
+		except:
+			cherrypy.log(f'error: unable to obtain a hash for file {filepath}')
+			cherrypy.log(f'       will return the default rating, but you should investigate')
+			return STARTRATING
 
 		try:
 			connection = sqlite3.connect(self.dbfile)
@@ -57,7 +80,13 @@ class ELO_DB:
 			return None
 
 	def set_file_rating(self, filepath, newrating):
-		file_hash = self.get_file_hash(filepath)
+		try:
+			file_hash = self.get_file_hash(filepath)
+		except:
+			cherrypy.log(f'error: unable to obtain a hash for file {filepath}')
+			cherrypy.log(f'       attempted shift to elo {newrating} has failed')
+			return
+
 		connection = sqlite3.connect(self.dbfile)
 		with connection:
 			connection.execute('UPDATE Item SET path = ?, rating = ? WHERE hash = ?', (filepath, newrating, file_hash))
@@ -65,14 +94,20 @@ class ELO_DB:
 
 	def create_file_rating(self, filepath):
 		"""Add a new file to the db, with the starting rating"""
-		file_hash = self.get_file_hash(filepath)
+		try:
+			file_hash = self.get_file_hash(filepath)
+		except:
+			cherrypy.log(f'error: unable to obtain a hash for file {filepath}')
+			cherrypy.log(f'       attempt to insert record has failed')
+			return
+
 		abspath = os.path.abspath(filepath)
 		connection = sqlite3.connect(self.dbfile)
 		with connection:
 			connection.execute('INSERT INTO Item VALUES (?, ?, ?)', (file_hash, abspath, STARTRATING))
 		connection.close()
 
-	def get_all_ratings(self, start=0, count=10, filter = None):
+	def get_all_ratings(self, start=0, count=0, filter = None):
 		sql_query = 'SELECT * FROM Item ORDER BY rating DESC'
 		if count not in [0, None]:
 			sql_query += f' LIMIT {int(count)}'
@@ -127,6 +162,7 @@ class Depletable_Stack:
 class ELO_Sort:
 	def __init__(self, db: ELO_DB, items: Depletable_Stack):
 		self.db = db
+		self.db.clean_db()
 		self.items = items
 
 	def score_match(self, a, b, result_a, k = 16):
@@ -224,8 +260,9 @@ class ELO_Sort:
 	@cherrypy.expose
 	def script(self, offset=20):
 		offset = int(offset)
+		self.db.clean_db()
 		results = self.db.get_all_ratings(start = offset, count = 0, filter = self.items.known_items())
-		commands = '\n'.join([f'rm {os.path.basename(item["path"])} # {item["rating"]}' for item in results])		
+		commands = '\n'.join([f'rm "{item["path"]}" # {item["rating"]}' for item in results])		
 		template = f'''<!DOCTYPE html>
 <html>
 <head>
@@ -433,10 +470,9 @@ if __name__ == "__main__":
 	basedir = os.path.abspath(basedir)
 	dbfilename = os.path.join(basedir, opts.dbname)
 	db = ELO_DB(dbfilename)
-	filetypes = ['.'+x.strip() for x in opts.filetypes.split(",")]
-	# glob could be a lot better
-	everything = glob.glob(os.path.join(basedir, '**'), recursive=True)
-	items = [x for x in everything if os.path.splitext(x)[1] in filetypes]
+	items = []
+	for filetype in opts.filetypes.split(","):
+		items += glob.glob(os.path.join(basedir, '**', f'*.{filetype}'), recursive=True)
 	itemcollection = Depletable_Stack(items)
 
 	cherry_config = {
