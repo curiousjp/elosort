@@ -12,36 +12,37 @@ import shelve
 
 STARTRATING = 1000
 
-def set_rating(item: str, score: float, filename: str = 'scores.shelf') -> None:
+def set_rating(item: str, score: float, filename: str) -> None:
 	with shelve.open(filename) as db:
 		db[item] = score
 
-def set_ratings(items: List[Tuple[str,float]], filename: str = 'scores.shelf') -> None:
+def set_ratings(items: List[Tuple[str,float]], filename: str) -> None:
 	with shelve.open(filename) as db:
 		for item_name, item_score in items:
 			db[item_name] = item_score
 
-def get_rating(item: str, filename: str = 'scores.shelf') -> float:
+def get_rating(item: str, filename: str) -> float:
 	with shelve.open(filename) as db:
 		return db.get(item, STARTRATING)
 
-def get_all_ratings(limit: Optional[Set[int]] = None, offset: int = 0, filename: str = 'scores.shelf') -> List[Tuple[str, float]]:
+def get_all_ratings(filename: str, limit: Optional[Set[int]] = None, offset: int = 0) -> List[Tuple[str, float]]:
 	with shelve.open(filename) as db:
 		sorted_scores = sorted(db.items(), key = lambda x: x[1], reverse = True)
 		return sorted_scores[offset:offset+limit if limit else None]
 
-def clean_shelf(preserved_keys: Set[str], filename: str = 'scores.shelf') -> None:
+def clean_shelf(preserved_keys: Set[str], filename: str) -> None:
 	with shelve.open(filename) as db:
 		keys_to_delete = [key for key in db.keys() if key not in preserved_keys]
 		for key in keys_to_delete:
 			del db[key]
 
 class Depletable_Stack:
-	def __init__(self, from_folder: str, patterns: List[str] = ['*.jpg', '*.png']):
+	def __init__(self, from_folder: str, db_location: str, patterns: List[str] = ['*.jpg', '*.png']):
 		self._iteration = 0
+		self._dbl = db_location
 		directory = Path(from_folder)
 		self._permanent_items = [str(file) for pattern in patterns for file in directory.rglob(pattern)]
-		clean_shelf(set(self._permanent_items))
+		clean_shelf(set(self._permanent_items), self._dbl)
 		self.shuffle()
 
 	def _rebalance_stack(self):
@@ -74,8 +75,9 @@ class Depletable_Stack:
 			self._temporary_stack.remove(item)
 
 class Elo_Tournament:
-	def __init__(self, items: Depletable_Stack):
+	def __init__(self, items: Depletable_Stack, db_location: str):
 		self.items = items
+		self._dbl = db_location
 
 	def score_match(self, a: str, b: str, a_score: float, b_score: float, k: float = 16):
 		"""The 'result' here is the result for player A."""
@@ -84,8 +86,8 @@ class Elo_Tournament:
 			self.items.dequeue(a)
 			return
 
-		a_rating = get_rating(a)
-		b_rating = get_rating(b)
+		a_rating = get_rating(a, self._dbl)
+		b_rating = get_rating(b, self._dbl)
 	
 		a_expected = 1.0 / (1.0 + (10.0 ** ((b_rating - a_rating) / 400.0)))
 		b_expected = 1.0 / (1.0 + (10.0 ** ((a_rating - b_rating) / 400.0)))
@@ -96,7 +98,7 @@ class Elo_Tournament:
 		set_ratings([
 			(a, new_a_rating),
 			(b, new_b_rating),
-		])
+		], self._dbl)
 		self.items.dequeue(a)
 		self.items.dequeue(b)
 
@@ -174,7 +176,7 @@ class Elo_Tournament:
 	@cherrypy.expose
 	def script(self, offset: int = 20) -> str:
 		offset = int(offset)
-		results = get_all_ratings(offset = offset, limit = None)
+		results = get_all_ratings(self._dbl, limit = None, offset = offset)
 		commands = '\n'.join([f'rm "{item[0]}" # {item[1]}' for item in results])
 		template = f'''<!DOCTYPE html>
 <html>
@@ -208,7 +210,7 @@ class Elo_Tournament:
 		start = max(0, int(start))
 		count = max(0, int(count))
 
-		results = get_all_ratings(offset = start, limit = count if count > 0 else None)
+		results = get_all_ratings(self._dbl, limit = count if count > 0 else None, offset = count)
 		if count == 0:
 			count = len(results)
 
@@ -375,9 +377,11 @@ gallery-item div.score {
 '''
 
 if __name__ == "__main__":
+	global FILE_LOCATION
 	parser = OptionParser()
 	parser.add_option("--port", dest="port", default=9090, type="int", help="Port to run the server on", metavar="PORTNUM")
-	
+	parser.add_option("--dbname", dest="dbname", default="scores.shelf", help="Name of rating database file", metavar="NAME")
+
 	(opts, args) = parser.parse_args()
 	
 	if args:
@@ -385,7 +389,7 @@ if __name__ == "__main__":
 	else:
 		basedir = "."
 	basedir = os.path.abspath(basedir)
-	itemcollection = Depletable_Stack(basedir)
+	itemcollection = Depletable_Stack(basedir, opts.dbname)
 
 	cherry_config = {
 		'global': {
@@ -399,5 +403,5 @@ if __name__ == "__main__":
 			'tools.staticdir.dir': "/"
 		},
 	}
-	cherrypy.quickstart(Elo_Tournament(itemcollection), "/", config = cherry_config)
+	cherrypy.quickstart(Elo_Tournament(itemcollection, opts.dbname), "/", config = cherry_config)
 
