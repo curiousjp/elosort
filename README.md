@@ -5,7 +5,8 @@
 
 ### Notes from the forker:
 This fork has some minor modifications to bring it up to compatibility with Python3, make some small improvements in line with what I think current best practice is, and to add a few features I find personally useful. The most significant of these are:
-* Output has been styled with a built-in stylesheet. 
+* Output has been styled with a built-in stylesheet.
+* Dependency on sqlite3 is gone, data is now backed by `shelve`
 * An endpoint, `/script`, has been created to provide you with a pasteable set of Unix commands to remove all but the top-*n* rated images (by default, 20). You can click on the script block to select it for copying and pasting.
 * The stack is now rebalanced with a randomly chosen item when it is reshuffled or when a peek is attempted with insufficient items remaining (possible if an item somehow ends up being matched against itself on a degenerately small stack).
 * On the main rating page, the up arrow key will now register a draw, and the down arrow key will take you to the results screen. Viewing the index no longer "consumes" items of the stack to be rated, this only happens when a result is submitted.
