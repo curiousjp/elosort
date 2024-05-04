@@ -1,144 +1,58 @@
 #!/usr/bin/env python
 
 import cherrypy
-import sqlite3
+
+from pathlib import Path
 from optparse import OptionParser
+from typing import Optional, Set, Tuple, List
+
 import os
-import hashlib
-import glob
 import random
+import shelve
 
 STARTRATING = 1000
 
-class ELO_DB:
-	def __init__(self, dbfile):
-		self.dbfile = dbfile
-		if not os.path.isfile(self.dbfile):
-			cherrypy.log(f'{self.dbfile} not found, making a new one')
-			try:
-				connection = sqlite3.connect(self.dbfile)
-				with connection:
-					connection.execute('CREATE TABLE Item (hash TEXT PRIMARY_KEY, path TEXT, rating INTEGER)')
-			except(sqlite3.OperationalError, sqlite3.IntegrityError, IOError) as e:
-				cherrypy.log(f'could not create a new table in {self.dbfile}', traceback = True)
-				raise
-			connection.close()
-		else:
-			cherrypy.log(f'{self.dbfile} found :)')
+def set_rating(item: str, score: float, filename: str = 'scores.shelf') -> None:
+	with shelve.open(filename) as db:
+		db[item] = score
 
-	def clean_db(self):
-		# testing for bad hashes (i.e. changed files) is in the too
-		# hard basket at the moment, but I do need to get to it someday
-		bad_filepaths = []
-		current_records = self.get_all_ratings()
-		for item in current_records:
-			if not os.path.exists(item['path']):
-				bad_filepaths.append((item['path'],))
-		if not bad_filepaths:
-			return
-		cherrypy.log(f'attempting to clean db of {len(bad_filepaths)} entries')
-		try:
-			connection = sqlite3.connect(self.dbfile)
-			with connection:
-				cursor = connection.executemany('DELETE FROM Item WHERE path = ?', bad_filepaths)
-		except(sqlite3.OperationalError, sqlite3.IntegrityError, IOError) as e:
-			cherrypy.log(f'error deleting items from database file {self.dbfile}, bad_filepaths was {bad_filepaths}', traceback = True)
+def set_ratings(items: List[Tuple[str,float]], filename: str = 'scores.shelf') -> None:
+	with shelve.open(filename) as db:
+		for item_name, item_score in items:
+			db[item_name] = item_score
 
-	def get_file_hash(self, filepath):
-		with open(filepath, 'rb') as f:
-			hash_object = hashlib.sha256()
-			hash_object.update(f.read())
-		return hash_object.hexdigest()
+def get_rating(item: str, filename: str = 'scores.shelf') -> float:
+	with shelve.open(filename) as db:
+		return db.get(item, STARTRATING)
 
-	def get_file_rating(self, filepath, createrating = True):
-		"""
-		Get the ELO rating for a given file.
+def get_all_ratings(limit: Optional[Set[int]] = None, offset: int = 0, filename: str = 'scores.shelf') -> List[Tuple[str, float]]:
+	with shelve.open(filename) as db:
+		sorted_scores = sorted(db.items(), key = lambda x: x[1], reverse = True)
+		return sorted_scores[offset:offset+limit if limit else None]
 
-		If the file isn't already in the db, add it with the starting rating if createrating is True
-		"""
-		try:
-			file_hash = self.get_file_hash(filepath)
-		except:
-			cherrypy.log(f'error: unable to obtain a hash for file {filepath}')
-			cherrypy.log(f'       will return the default rating, but you should investigate')
-			return STARTRATING
-
-		try:
-			connection = sqlite3.connect(self.dbfile)
-			with connection:
-				cursor = connection.execute('SELECT rating FROM Item WHERE hash = ?', (file_hash,))
-				result = cursor.fetchone()
-		except(sqlite3.OperationalError, sqlite3.IntegrityError, IOError) as e:
-			cherrypy.log(f'error reading ratings from database file {self.dbfile}', traceback = True)
-
-		if result:
-			return result[0]
-		elif createrating:
-			self.create_file_rating(filepath)
-			return STARTRATING
-		else:
-			return None
-
-	def set_file_rating(self, filepath, newrating):
-		try:
-			file_hash = self.get_file_hash(filepath)
-		except:
-			cherrypy.log(f'error: unable to obtain a hash for file {filepath}')
-			cherrypy.log(f'       attempted shift to elo {newrating} has failed')
-			return
-
-		connection = sqlite3.connect(self.dbfile)
-		with connection:
-			connection.execute('UPDATE Item SET path = ?, rating = ? WHERE hash = ?', (filepath, newrating, file_hash))
-		connection.close()
-
-	def create_file_rating(self, filepath):
-		"""Add a new file to the db, with the starting rating"""
-		try:
-			file_hash = self.get_file_hash(filepath)
-		except:
-			cherrypy.log(f'error: unable to obtain a hash for file {filepath}')
-			cherrypy.log(f'       attempt to insert record has failed')
-			return
-
-		abspath = os.path.abspath(filepath)
-		connection = sqlite3.connect(self.dbfile)
-		with connection:
-			connection.execute('INSERT INTO Item VALUES (?, ?, ?)', (file_hash, abspath, STARTRATING))
-		connection.close()
-
-	def get_all_ratings(self, start=0, count=0, filter = None):
-		sql_query = 'SELECT * FROM Item ORDER BY rating DESC'
-		if count not in [0, None]:
-			sql_query += f' LIMIT {int(count)}'
-		else:
-			sql_query += ' LIMIT -1'
-		if start not in [0, None]:
-			sql_query += f' OFFSET {int(start)}'
-		connection = sqlite3.connect(self.dbfile)
-		with connection:
-			cursor = connection.execute(sql_query)
-		rows = [dict(zip(['hash', 'path', 'rating'], row)) for row in cursor.fetchall()]
-		connection.close()
-		# really, there should be a more proactive approach to knocking out 'dead' 
-		# records in the database, but I see the databases as kind of ephemeral
-		if filter:
-			rows = [row for row in rows if row['path'] in filter]
-		return rows
+def clean_shelf(preserved_keys: Set[str], filename: str = 'scores.shelf') -> None:
+	with shelve.open(filename) as db:
+		keys_to_delete = [key for key in db.keys() if key not in preserved_keys]
+		for key in keys_to_delete:
+			del db[key]
 
 class Depletable_Stack:
-	def __init__(self, items):
-		self._permanent_items = items
+	def __init__(self, from_folder: str, patterns: List[str] = ['*.jpg', '*.png']):
+		self._iteration = 0
+		directory = Path(from_folder)
+		self._permanent_items = [str(file) for pattern in patterns for file in directory.rglob(pattern)]
+		clean_shelf(set(self._permanent_items))
 		self.shuffle()
 
 	def _rebalance_stack(self):
-		# make up a pair if the stack is odd sized
+		# make up an additional pair if the stack is oddly sized
 		if len(self._temporary_stack) % 2 == 1:
 			cherrypy.log(f'adding bonus item to rebalance stack')
 			self._temporary_stack.append(random.choice(self._permanent_items[:]))
 
 	def shuffle(self):
-		cherrypy.log(f'reshuffling, {len(self._permanent_items)} items entering the stack')
+		self._iteration += 1
+		cherrypy.log(f'reshuffling ({self._iteration}), {len(self._permanent_items)} items entering the stack')
 		self._temporary_stack = self._permanent_items[:]
 		random.shuffle(self._temporary_stack)
 		self._rebalance_stack()
@@ -159,57 +73,57 @@ class Depletable_Stack:
 		if item in self._temporary_stack:
 			self._temporary_stack.remove(item)
 
-class ELO_Sort:
-	def __init__(self, db: ELO_DB, items: Depletable_Stack):
-		self.db = db
-		self.db.clean_db()
+class Elo_Tournament:
+	def __init__(self, items: Depletable_Stack):
 		self.items = items
 
-	def score_match(self, a, b, result_a, k = 16):
+	def score_match(self, a: str, b: str, a_score: float, b_score: float, k: float = 16):
 		"""The 'result' here is the result for player A."""
 
 		if a == b:
 			self.items.dequeue(a)
 			return
 
-		a_rating = self.db.get_file_rating(a)
-		b_rating = self.db.get_file_rating(b)
-
-		if result_a == 1:
-			a_score, b_score = 1.0, 0.0
-		elif result_a == 0:
-			a_score, b_score = 0.0, 1.0
-		else:
-			a_score, b_score = 0.5, 0.5
-		
+		a_rating = get_rating(a)
+		b_rating = get_rating(b)
+	
 		a_expected = 1.0 / (1.0 + (10.0 ** ((b_rating - a_rating) / 400.0)))
 		b_expected = 1.0 / (1.0 + (10.0 ** ((a_rating - b_rating) / 400.0)))
 
 		new_a_rating = a_rating + k * (a_score - a_expected)
 		new_b_rating = b_rating + k * (b_score - b_expected)
 
-		# print(f'elo: a: rating: {a_rating}, score: {a_score}, expected: {a_expected}, new: {new_a_rating}')
-		# print(f'elo: b: rating: {b_rating}, score: {b_score}, expected: {b_expected}, new: {new_b_rating}')
-
-		self.db.set_file_rating(a, new_a_rating)
+		set_ratings([
+			(a, new_a_rating),
+			(b, new_b_rating),
+		])
 		self.items.dequeue(a)
-		self.db.set_file_rating(b, new_b_rating)
 		self.items.dequeue(b)
 
-	def menu_div(self, tag = 'Clean URL and Continue Rating'):
+	def menu_div(self, tag: str = 'Clean URL and Continue Rating') -> str:
 		return f'''
 <div class="full-width-container">
 	<p align="center"><a href="/results">See Results</a> - <a href="/">{tag}</a> - <a href="/script">Purge</a> - {self.items.stack_remaining()} remaining</p>
 </div>'''
 
 	@cherrypy.expose 
-	def index(self, a = None, b = None, result = None, force_im1 = None, force_im2 = None):
+	def index(self, a = None, b = None, result = None, force_im1 = None, force_im2 = None) -> str:
 		if a and b and result:
 			try:
+				# result value here is a's result
 				result_value = float(result)
 				if result_value not in [0.0, 0.5, 1.0]:
 					raise ValueError('result must be 0.0, 0.5, or 1.0')
-				self.score_match(a, b, result_value)
+				elif result_value == 0:
+					# a loss
+					a_result, b_result = 0, 1
+				elif result_value == 1:
+					# a win
+					a_result, b_result = 1, 0
+				else:
+					# draw
+					a_result, b_result = 0.5, 0.5
+				self.score_match(a, b, a_result, b_result)
 			except ValueError as ve:
 				return f'ValueError: {repr(ve)}'
 
@@ -258,11 +172,10 @@ class ELO_Sort:
 		return template
 
 	@cherrypy.expose
-	def script(self, offset=20):
+	def script(self, offset: int = 20) -> str:
 		offset = int(offset)
-		self.db.clean_db()
-		results = self.db.get_all_ratings(start = offset, count = 0, filter = self.items.known_items())
-		commands = '\n'.join([f'rm "{item["path"]}" # {item["rating"]}' for item in results])		
+		results = get_all_ratings(offset = offset, limit = None)
+		commands = '\n'.join([f'rm "{item[0]}" # {item[1]}' for item in results])
 		template = f'''<!DOCTYPE html>
 <html>
 <head>
@@ -291,15 +204,15 @@ class ELO_Sort:
 		return template
 	
 	@cherrypy.expose
-	def results(self, start=0, count=0):
+	def results(self, start: int = 0, count: int = 0) -> str:
 		start = max(0, int(start))
 		count = max(0, int(count))
 
-		results = self.db.get_all_ratings(start, count, filter = self.items.known_items())
+		results = get_all_ratings(offset = start, limit = count if count > 0 else None)
 		if count == 0:
 			count = len(results)
 
-		gallery_items = [ f'<div class="gallery-item"><img data-path="{x["path"]}" src="static/{x["path"]}"><div class="score">Score: {x["rating"]:.3f}</div></div>' for x in results]
+		gallery_items = [ f'<div class="gallery-item {"prestige" if index <20 else ""}"><img data-path="{x[0]}" src="static/{x[0]}"><div class="score">Score: {x[1]:.3f}</div></div>' for index, x in enumerate(results)]
 		gallery_string = '\n'.join(gallery_items)
 
 		template = f'''<!DOCTYPE html>
@@ -381,7 +294,7 @@ class ELO_Sort:
 		return template
 	
 	@cherrypy.expose
-	def stylesheet(self):
+	def stylesheet(self) -> str:
 		cherrypy.response.headers['Content-Type'] = 'text/css'
 		return '''body {
 	align-items: center;
@@ -430,6 +343,10 @@ class ELO_Sort:
 	padding: 15px;
 }
 
+.prestige {
+	background-color: #fff3e0;
+}
+
 .gallery-item img {
 	border-radius: 5px;
 	height: auto;
@@ -459,21 +376,16 @@ gallery-item div.score {
 
 if __name__ == "__main__":
 	parser = OptionParser()
-	parser.add_option("--dbname", dest="dbname", default=".elosortdb.sql3",	help="Name of rating database file", metavar="NAME")
-	parser.add_option("--filetypes", dest="filetypes", default="jpg,png,gif", help="Comma separated list of file extensions", metavar="LIST")
-	parser.add_option("--port", dest="port", default=8080, type="int", help="Port to run the server on", metavar="PORTNUM")
+	parser.add_option("--port", dest="port", default=9090, type="int", help="Port to run the server on", metavar="PORTNUM")
+	
 	(opts, args) = parser.parse_args()
+	
 	if args:
 		basedir = args[0]
 	else:
 		basedir = "."
 	basedir = os.path.abspath(basedir)
-	dbfilename = os.path.join(basedir, opts.dbname)
-	db = ELO_DB(dbfilename)
-	items = []
-	for filetype in opts.filetypes.split(","):
-		items += glob.glob(os.path.join(basedir, '**', f'*.{filetype}'), recursive=True)
-	itemcollection = Depletable_Stack(items)
+	itemcollection = Depletable_Stack(basedir)
 
 	cherry_config = {
 		'global': {
@@ -487,5 +399,5 @@ if __name__ == "__main__":
 			'tools.staticdir.dir': "/"
 		},
 	}
-	cherrypy.quickstart(ELO_Sort(db, itemcollection), "/", config = cherry_config)
+	cherrypy.quickstart(Elo_Tournament(itemcollection), "/", config = cherry_config)
 
