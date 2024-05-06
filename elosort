@@ -33,6 +33,9 @@ def get_all_ratings(filename: str, limit: Optional[Set[int]] = None, offset: int
 def clean_shelf(preserved_keys: Set[str], filename: str) -> None:
 	with shelve.open(filename) as db:
 		keys_to_delete = [key for key in db.keys() if key not in preserved_keys]
+		if keys_to_delete:
+			cherrypy.log(f'** about to remove {len(keys_to_delete)} keys (of {len(db.keys())}) from {filename} - is this correct?')
+			_ = input('Press enter to continue or ctrl-C to exit.')
 		for key in keys_to_delete:
 			del db[key]
 
@@ -197,7 +200,7 @@ class Elo_Tournament:
 <body>
 	{self.menu_div('Return to Scoring')}
 	<div class="code-block">
-		<pre># you can call this page with different ?offset= arguments to preserve more files from deletion.</pre>
+		<pre># you can call this page with different ?offset= arguments to preserve more files from deletion. offset: <a href="/script?offset=40">40</a> - <a href="/script?offset=60">60</a> - <a href="/script?offset=80">80</a> - <a href="/script?offset=100">100</a></pre>
 		<pre onclick="selectText(this)">{commands}</pre>
 	</div>
 </body>
@@ -206,7 +209,15 @@ class Elo_Tournament:
 		return template
 	
 	@cherrypy.expose
-	def results(self, start: int = 0, count: int = 0) -> str:
+	def results(self, start: int = 0, count: int = 0, switch_a: str = None, switch_b: str = None) -> str:
+		if switch_a and switch_b:
+			old_a_rating = get_rating(switch_a, self._dbl)
+			old_b_rating = get_rating(switch_b, self._dbl)
+			set_ratings([
+				(switch_a, old_b_rating),
+				(switch_b, old_a_rating),
+			], self._dbl)
+
 		start = max(0, int(start))
 		count = max(0, int(count))
 
@@ -229,11 +240,16 @@ class Elo_Tournament:
 	<script language="javascript" type="text/javascript">
 		document.addEventListener('DOMContentLoaded', () => {{
 			const divs = document.querySelectorAll('div.gallery-item');
-			const link = document.getElementById('contestLink')
+			const contest_link = document.getElementById('contestLink')
+			const switch_link = document.getElementById('switchLink')
 
-			link.removeAttribute('href');
-			link.style.pointerEvents = 'none';
-			link.style.opacity = 0.5;
+			contest_link.removeAttribute('href');
+			contest_link.style.pointerEvents = 'none';
+			contest_link.style.opacity = 0.5;
+
+			switch_link.removeAttribute('href');
+			switch_link.style.pointerEvents = 'none';
+			switch_link.style.opacity = 0.5;
 
 			let highlighted = [];
 
@@ -266,13 +282,22 @@ class Elo_Tournament:
 							second_item = second_item.slice(7);
 						}}
 
-						link.href = '/?force_im1=' + first_item + '&force_im2=' + second_item;
-						link.style.pointerEvents = 'auto';
-						link.style.opacity = 1;
+						contest_link.href = '/?force_im1=' + first_item + '&force_im2=' + second_item;
+						contest_link.style.pointerEvents = 'auto';
+						contest_link.style.opacity = 1;
+
+						switch_link.href = '/results?switch_a=' + first_item + '&switch_b=' + second_item;
+						switch_link.style.pointerEvents = 'auto';
+						switch_link.style.opacity = 1;
 					}} else {{
-						link.removeAttribute('href');
-						link.style.pointerEvents = 'none';
-						link.style.opacity = 0.5;
+						contest_link.removeAttribute('href');
+						contest_link.style.pointerEvents = 'none';
+						contest_link.style.opacity = 0.5;
+						
+						switch_link.removeAttribute('href');
+						switch_link.style.pointerEvents = 'none';
+						switch_link.style.opacity = 0.5;
+
 					}}
 				}});
 			}});
@@ -282,7 +307,7 @@ class Elo_Tournament:
 <body>
 	{self.menu_div('Continue Rating')}
 	<div class="full-width-container">
-		<a id="contestLink" href="/">Force Matchup between Clicked Items</a>
+		<a id="contestLink" href="/">Force Matchup between Clicked Items</a> - <a id="switchLink" href="/results">Switch Clicked Items</a>
 	</div>
 	<div class="gallery">
 		{gallery_string}
