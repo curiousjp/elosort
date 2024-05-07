@@ -5,6 +5,7 @@ import cherrypy
 from pathlib import Path
 from optparse import OptionParser
 from typing import Optional, Set, Tuple, List
+from itertools import combinations
 
 import os
 import random
@@ -34,48 +35,54 @@ def clean_shelf(preserved_keys: Set[str], filename: str) -> None:
 	with shelve.open(filename) as db:
 		keys_to_delete = [key for key in db.keys() if key not in preserved_keys]
 		if keys_to_delete:
-			cherrypy.log(f'** about to remove {len(keys_to_delete)} keys (of {len(db.keys())}) from {filename} - is this correct?')
+			cherrypy.log(f'about to remove {len(keys_to_delete)} keys (of {len(db.keys())}) from {filename} - is this correct?')
 			_ = input('Press enter to continue or ctrl-C to exit.')
 		for key in keys_to_delete:
 			del db[key]
+		keys_to_default = [key for key in preserved_keys if key not in db.keys()]
+		cherrypy.log(f'setting a default value for {len(keys_to_default)} keys')
+		for key in keys_to_default:
+			db[key] = STARTRATING
 
 class Depletable_Stack:
-	def __init__(self, from_folder: str, db_location: str, patterns: List[str] = ['*.jpg', '*.png']):
+	def __init__(self, from_folder: str, session_length: int, db_location: str, patterns: List[str] = ['*.jpg', '*.png']):
 		self._iteration = 0
 		self._dbl = db_location
+		self._session_length = session_length
 		directory = Path(from_folder)
 		self._permanent_items = [str(file) for pattern in patterns for file in directory.rglob(pattern)]
 		clean_shelf(set(self._permanent_items), self._dbl)
 		self.shuffle()
 
-	def _rebalance_stack(self):
-		# make up an additional pair if the stack is oddly sized
-		if len(self._temporary_stack) % 2 == 1:
-			cherrypy.log(f'adding bonus item to rebalance stack')
-			self._temporary_stack.append(random.choice(self._permanent_items[:]))
-
 	def shuffle(self):
 		self._iteration += 1
-		cherrypy.log(f'reshuffling ({self._iteration}), {len(self._permanent_items)} items entering the stack')
-		self._temporary_stack = self._permanent_items[:]
-		random.shuffle(self._temporary_stack)
-		self._rebalance_stack()
+		all_scores = dict(get_all_ratings(self._dbl))
+		p_a = lambda a, b: 1 / (1 + 10 ** ((b - a) / 400))
+		matchups = list(combinations(all_scores.keys(), 2))
+		uncertainties = []
+		for a, b in matchups:
+			p_a_win = p_a(all_scores[a], all_scores[b])
+			uncertainty = 1 - abs(0.5 - p_a_win)
+			uncertainties.append(((a, b), uncertainty))
+		random.shuffle(uncertainties)
+		uncertainties.sort(key = lambda x: x[1], reverse = True)
+		self._temporary_stack = []
+		for matchup in uncertainties[:self._session_length]:
+			self._temporary_stack.append(matchup[0])
+		if uncertainties[0][1] < 1.0:
+			cherrypy.log(f'maximum uncertainty is now {uncertainties[0][1]} @ iteration {self._iteration}')
 
 	def stack_remaining(self):
 		return len(self._temporary_stack)
 
-	def known_items(self):
-		return self._permanent_items[:]
-	
 	def peek(self):
 		if len(self._temporary_stack) == 0:
 			self.shuffle()
-		self._rebalance_stack()
-		return tuple(self._temporary_stack[0:2])
+		return self._temporary_stack[0]
 	
-	def dequeue(self, item):
-		if item in self._temporary_stack:
-			self._temporary_stack.remove(item)
+	def dequeue(self, pair):
+		if pair in self._temporary_stack:
+			self._temporary_stack.remove(pair)
 
 class Elo_Tournament:
 	def __init__(self, items: Depletable_Stack, db_location: str):
@@ -86,7 +93,7 @@ class Elo_Tournament:
 		"""The 'result' here is the result for player A."""
 
 		if a == b:
-			self.items.dequeue(a)
+			self.items.dequeue((a, b))
 			return
 
 		a_rating = get_rating(a, self._dbl)
@@ -102,8 +109,8 @@ class Elo_Tournament:
 			(a, new_a_rating),
 			(b, new_b_rating),
 		], self._dbl)
-		self.items.dequeue(a)
-		self.items.dequeue(b)
+		self.items.dequeue((a, b))
+		self.items.dequeue((b, a))
 
 	def menu_div(self, tag: str = 'Clean URL and Continue Rating') -> str:
 		return f'''
@@ -405,6 +412,7 @@ if __name__ == "__main__":
 	global FILE_LOCATION
 	parser = OptionParser()
 	parser.add_option("--port", dest="port", default=9090, type="int", help="Port to run the server on", metavar="PORTNUM")
+	parser.add_option("--session", dest="session", default=10, type="int", help="Number of image pairs per session", metavar="SESSION")
 	parser.add_option("--dbname", dest="dbname", default="scores.shelf", help="Name of rating database file", metavar="NAME")
 
 	(opts, args) = parser.parse_args()
@@ -414,7 +422,7 @@ if __name__ == "__main__":
 	else:
 		basedir = "."
 	basedir = os.path.abspath(basedir)
-	itemcollection = Depletable_Stack(basedir, opts.dbname)
+	itemcollection = Depletable_Stack(basedir, opts.session, opts.dbname)
 
 	cherry_config = {
 		'global': {
