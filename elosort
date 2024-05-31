@@ -63,8 +63,15 @@ class Depletable_Stack:
 		for a, b in matchups:
 			p_a_win = p_a(all_scores[a], all_scores[b])
 			uncertainty = 1 - abs(0.5 - p_a_win)
-			uncertainties.append(((a, b), uncertainty))
+			deviation = abs(STARTRATING - all_scores[a]) + abs (STARTRATING - all_scores[b])
+			uncertainties.append(((a, b), uncertainty, deviation))
 		random.shuffle(uncertainties)
+		
+		# leverage python 3 sort stability to bring the items closest to
+		# STARTRATING to the front of each uncertainty band... this should
+		# assist in seeing more of the dataset during the long march to u < 1
+		
+		uncertainties.sort(key = lambda x: x[2], reverse = False)
 		uncertainties.sort(key = lambda x: x[1], reverse = True)
 		self._temporary_stack = []
 		for matchup in uncertainties[:self._session_length]:
