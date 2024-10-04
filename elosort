@@ -3,7 +3,7 @@
 import cherrypy
 
 from pathlib import Path
-from optparse import OptionParser
+from argparse import ArgumentParser
 from typing import Optional, Set, Tuple, List
 from itertools import combinations
 
@@ -45,34 +45,49 @@ def clean_shelf(preserved_keys: Set[str], filename: str) -> None:
 			db[key] = STARTRATING
 
 class Depletable_Stack:
-	def __init__(self, from_folder: str, session_length: int, db_location: str, patterns: List[str] = ['*.jpg', '*.png']):
+	def __init__(self, from_folder: str, session_length: int, db_location: str, prefilled: bool, patterns: List[str] = ['*.jpg', '*.png', '*.mp4', '*.gif']):
 		self._iteration = 0
+		self._dequeue_events = {}
 		self._dbl = db_location
 		self._session_length = session_length
-		directory = Path(from_folder)
-		self._permanent_items = [str(file) for pattern in patterns for file in directory.rglob(pattern)]
-		clean_shelf(set(self._permanent_items), self._dbl)
+
+		if not prefilled:
+			directory = Path(from_folder)
+			permanent_items = [str(file) for pattern in patterns for file in directory.rglob(pattern)]
+			clean_shelf(set(permanent_items), self._dbl)
+		
 		self.shuffle()
 
 	def shuffle(self):
 		self._iteration += 1
 		all_scores = dict(get_all_ratings(self._dbl))
 		p_a = lambda a, b: 1 / (1 + 10 ** ((b - a) / 400))
-		matchups = list(combinations(all_scores.keys(), 2))
+		
+		# too expensive up in the 10000 item range
+		#matchups = list(combinations(all_scores.keys(), 2))
+		
+		participants = list(all_scores.keys())
+		random.shuffle(participants)
+		matchups = []
+		for i in range(0, len(participants) - 1, 2):
+			matchups.append((participants[i], participants[i+1]))
+		if(len(participants) % 2 != 0):
+			matchups.append((participants[-1], random.choice(participants[:-1])))
+		
 		uncertainties = []
 		for a, b in matchups:
 			p_a_win = p_a(all_scores[a], all_scores[b])
 			uncertainty = 1 - abs(0.5 - p_a_win)
 			deviation = abs(STARTRATING - all_scores[a]) + abs (STARTRATING - all_scores[b])
-			uncertainties.append(((a, b), uncertainty, deviation))
+			dequeue_events = self._dequeue_events.get(a,0) + self._dequeue_events.get(b,0)
+			uncertainties.append(((a, b), uncertainty, deviation, dequeue_events))
 		random.shuffle(uncertainties)
 		
-		# leverage python 3 sort stability to bring the items closest to
-		# STARTRATING to the front of each uncertainty band... this should
-		# assist in seeing more of the dataset during the long march to u < 1
-		
+		# sorting by minimial seen count, then uncertainty, then how close they are to the startrating
 		uncertainties.sort(key = lambda x: x[2], reverse = False)
 		uncertainties.sort(key = lambda x: x[1], reverse = True)
+		uncertainties.sort(key = lambda x: x[3], reverse = False)
+
 		self._temporary_stack = []
 		for matchup in uncertainties[:self._session_length]:
 			self._temporary_stack.append(matchup[0])
@@ -89,6 +104,8 @@ class Depletable_Stack:
 	
 	def dequeue(self, pair):
 		if pair in self._temporary_stack:
+			self._dequeue_events[pair[0]] = self._dequeue_events.get(pair[0], 0) + 1
+			self._dequeue_events[pair[1]] = self._dequeue_events.get(pair[1], 0) + 1
 			self._temporary_stack.remove(pair)
 
 class Elo_Tournament:
@@ -97,9 +114,10 @@ class Elo_Tournament:
 		self._dbl = db_location
 
 	def score_match(self, a: str, b: str, a_score: float, b_score: float, k: float = 16):
-		"""The 'result' here is the result for player A."""
+		"""Special case here for 0, 0 - punish both candidates with a loss"""
 
-		if a == b:
+		# draw
+		if a == b and a == 0.5:
 			self.items.dequeue((a, b))
 			return
 
@@ -122,23 +140,26 @@ class Elo_Tournament:
 	def menu_div(self, tag: str = 'Clean URL and Continue Rating') -> str:
 		return f'''
 <div class="full-width-container">
-	<p align="center"><a href="/results">See Results</a> - <a href="/">{tag}</a> - <a href="/script">Purge</a> - {self.items.stack_remaining()} remaining</p>
+	<p align="center"><a href="/results?count=50">See Results</a> - <a href="/">{tag}</a> - <a href="/script">Purge</a> - {self.items.stack_remaining()} remaining</p>
 </div>'''
 
 	@cherrypy.expose 
-	def index(self, a = None, b = None, result = None, force_im1 = None, force_im2 = None) -> str:
+	def index(self, a = None, b = None, result = None, force_im1 = None, force_im2 = None, count = None) -> str:
 		if a and b and result:
 			try:
 				# result value here is a's result
 				result_value = float(result)
-				if result_value not in [0.0, 0.5, 1.0]:
-					raise ValueError('result must be 0.0, 0.5, or 1.0')
+				if result_value not in [-1.0, 0.0, 0.5, 1.0]:
+					raise ValueError('result must be -1.0, 0.0, 0.5, or 1.0')
 				elif result_value == 0:
 					# a loss
 					a_result, b_result = 0, 1
 				elif result_value == 1:
 					# a win
 					a_result, b_result = 1, 0
+				elif result_value == -1:
+					# punish
+					a_result, b_result = 0, 0
 				else:
 					# draw
 					a_result, b_result = 0.5, 0.5
@@ -153,6 +174,15 @@ class Elo_Tournament:
 		if force_im2:
 			im2 = force_im2
 
+		if(im1.endswith('.mp4')):
+			element1 = f'<video controls autoplay loop muted><source src="static/{im1}" type="video/mp4"/></video>'
+		else:
+			element1 = f'<img src="static/{im1}"/>'
+		if(im2.endswith('.mp4')):
+			element2 = f'<video controls autoplay loop muted><source src="static/{im2}" type="video/mp4"/></video>'
+		else:
+			element2 = f'<img src="static/{im2}"/>'
+
 		template = f'''<!DOCTYPE html>
 <html>
 <head>
@@ -164,16 +194,23 @@ class Elo_Tournament:
 
 			switch( key ) {{
 				case 37: //left
+				case 65: //a
 					window.location.href="/?a={im1}&b={im2}&result=1.0"
 					break;
 				case 38: //up
+				case 87: //w
 					window.location.href="/?a={im1}&b={im2}&result=0.5"
 					break;
 				case 39: //right
+				case 68: //d
 					window.location.href="/?a={im2}&b={im1}&result=1.0"
 					break;
 				case 40: //down
-					window.location.href="/results"
+				case 83: //s
+					window.location.href="/results?count=50"
+					break;
+				case 46: //del
+					window.location.href="/?a={im2}&b={im1}&result=-1.0"
 					break;
 			}}
 		}}
@@ -182,8 +219,8 @@ class Elo_Tournament:
 <body>
 	{self.menu_div('Punt')}
 	<div class="twoup">
-		<div class="gallery-item"><a href="/?a={im1}&b={im2}&result=1"><img src="static/{im1}"></a></div>
-		<div class="gallery-item"><a href="/?a={im2}&b={im1}&result=1"><img src="static/{im2}"></a></div>
+		<div class="gallery-item"><a href="/?a={im1}&b={im2}&result=1">{element1}</a></div>
+		<div class="gallery-item"><a href="/?a={im2}&b={im1}&result=1">{element2}</a></div>
 	</div>
 </body>
 </html>
@@ -235,11 +272,17 @@ class Elo_Tournament:
 		start = max(0, int(start))
 		count = max(0, int(count))
 
-		results = get_all_ratings(self._dbl, limit = count if count > 0 else None, offset = count)
+		results = get_all_ratings(self._dbl, limit = count if count > 0 else None, offset = start)
 		if count == 0:
 			count = len(results)
 
-		gallery_items = [ f'<div class="gallery-item {"prestige" if index <20 else ""}"><img data-path="{x[0]}" src="static/{x[0]}"><div class="score">Score: {x[1]:.3f}</div></div>' for index, x in enumerate(results)]
+		gallery_items = []
+		for index, x in enumerate(results):
+			if(x[0].endswith('.mp4')):
+				element = f'<video loop muted data-path="{x[0]}"><source src="static/{x[0]}" type="video/mp4"/>'
+			else:
+				element = f'<img data-path="{x[0]}" src="static/{x[0]}">'
+			gallery_items.append(f'<div class="gallery-item {"prestige" if index <20 else ""}">{element}<div class="score">Score: {x[1]:.3f}</div></div>')
 		gallery_string = '\n'.join(gallery_items)
 
 		template = f'''<!DOCTYPE html>
@@ -254,8 +297,10 @@ class Elo_Tournament:
 	<script language="javascript" type="text/javascript">
 		document.addEventListener('DOMContentLoaded', () => {{
 			const divs = document.querySelectorAll('div.gallery-item');
-			const contest_link = document.getElementById('contestLink')
-			const switch_link = document.getElementById('switchLink')
+			const contest_link = document.getElementById('contestLink');
+			const switch_link = document.getElementById('switchLink');
+			const start={start};
+			const count={count};
 
 			contest_link.removeAttribute('href');
 			contest_link.style.pointerEvents = 'none';
@@ -284,8 +329,8 @@ class Elo_Tournament:
 					}}
 					// If exactly two divs are highlighted, enable the matchup link
 					if(highlighted.length == 2) {{
-						const first_image = highlighted[0].querySelector('img');
-						const second_image = highlighted[1].querySelector('img');
+						const first_image = highlighted[0].querySelector('img') || highlighted[0].querySelector('video');
+						const second_image = highlighted[1].querySelector('img') || highlighted[1].querySelector('video');
 						let first_item = first_image.dataset.path;
 						let second_item = second_image.dataset.path;
 
@@ -297,10 +342,14 @@ class Elo_Tournament:
 						}}
 
 						contest_link.href = '/?force_im1=' + first_item + '&force_im2=' + second_item;
+						if(count>0) contest_link.href += '&count=' + count;
+						if(start>0) contest_link.href += '&start=' + start;
 						contest_link.style.pointerEvents = 'auto';
 						contest_link.style.opacity = 1;
 
 						switch_link.href = '/results?switch_a=' + first_item + '&switch_b=' + second_item;
+						if(count>0) switch_link.href += '&count=' + count;
+						if(start>0) switch_link.href += '&start=' + start;
 						switch_link.style.pointerEvents = 'auto';
 						switch_link.style.opacity = 1;
 					}} else {{
@@ -357,7 +406,7 @@ class Elo_Tournament:
 	width: 100%;
 }
 
-.twoup img {
+.twoup img, .twoup video {
 	border-radius: 5px;
 	height: 100%;
 	max-height: 80vh;
@@ -388,7 +437,7 @@ class Elo_Tournament:
 	background-color: #fff3e0;
 }
 
-.gallery-item img {
+.gallery-item img, .gallery-item video {
 	border-radius: 5px;
 	height: auto;
 	object-fit: cover;
@@ -417,31 +466,29 @@ gallery-item div.score {
 
 if __name__ == "__main__":
 	global FILE_LOCATION
-	parser = OptionParser()
-	parser.add_option("--port", dest="port", default=9090, type="int", help="Port to run the server on", metavar="PORTNUM")
-	parser.add_option("--session", dest="session", default=10, type="int", help="Number of image pairs per session", metavar="SESSION")
-	parser.add_option("--dbname", dest="dbname", default="scores.shelf", help="Name of rating database file", metavar="NAME")
+	parser = ArgumentParser()
+	parser.add_argument("-p", "--port", dest="port", default=9090, type=int, help="port to run the server on", metavar="PORTNUM")
+	parser.add_argument("-s", "--session", dest="session", default=10000, type=int, help="number of image pairs to test before refilling the stack", metavar="SESSION")
+	parser.add_argument("-d", "--dbname", dest="dbname", default="scores.shelf", type=str, help="name of ratings database file", metavar="NAME")
+	parser.add_argument("-r", "--prefilled", dest="prefilled", action="store_true", help="whether the ratings database file has been prepopulated")
+	parser.add_argument("-b", "--basedir", default=".", type=str, help="the folder to read files from if not using a prepopulated ratings database file", metavar="FOLDER")
 
-	(opts, args) = parser.parse_args()
+	args = parser.parse_args()
 	
-	if args:
-		basedir = args[0]
-	else:
-		basedir = "."
-	basedir = os.path.abspath(basedir)
-	itemcollection = Depletable_Stack(basedir, opts.session, opts.dbname)
+	basedir = os.path.abspath(args.basedir)
+	itemcollection = Depletable_Stack(basedir, args.session, args.dbname, args.prefilled)
 
 	cherry_config = {
 		'global': {
-			'server.socket_port': opts.port, 
+			'server.socket_port': args.port, 
 			'log.screen': False,
 			'log.access_file': '/dev/null',
 			'log.error_file': '/dev/stdout',
 		},
 		'/static': {
 			'tools.staticdir.on': True,	
-			'tools.staticdir.dir': "/"
+			'tools.staticdir.dir': '/'
 		},
 	}
-	cherrypy.quickstart(Elo_Tournament(itemcollection, opts.dbname), "/", config = cherry_config)
+	cherrypy.quickstart(Elo_Tournament(itemcollection, args.dbname), '/', config = cherry_config)
 
