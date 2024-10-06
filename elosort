@@ -5,10 +5,10 @@ import cherrypy
 from pathlib import Path
 from argparse import ArgumentParser
 from typing import Optional, Set, Tuple, List
-from itertools import combinations
 
 import os
 import random
+import math
 import shelve
 
 STARTRATING = 1000
@@ -45,8 +45,9 @@ def clean_shelf(preserved_keys: Set[str], filename: str) -> None:
 			db[key] = STARTRATING
 
 class Depletable_Stack:
-	def __init__(self, from_folder: str, session_length: int, db_location: str, prefilled: bool, patterns: List[str] = ['*.jpg', '*.png', '*.mp4', '*.gif']):
+	def __init__(self, from_folder: str, session_length: int, db_location: str, prefilled: bool, poolshrink: int, patterns: List[str] = ['*.jpg', '*.png', '*.mp4', '*.gif']):
 		self._iteration = 0
+		self._poolshrink = poolshrink;
 		self._dequeue_events = {}
 		self._dbl = db_location
 		self._session_length = session_length
@@ -60,39 +61,40 @@ class Depletable_Stack:
 
 	def shuffle(self):
 		self._iteration += 1
-		all_scores = dict(get_all_ratings(self._dbl))
-		p_a = lambda a, b: 1 / (1 + 10 ** ((b - a) / 400))
 		
-		# too expensive up in the 10000 item range
-		#matchups = list(combinations(all_scores.keys(), 2))
+		# get_all_ratings already sorts high to low
+		ratings = get_all_ratings(self._dbl)
+		if(self._poolshrink > 0):
+			p_pool_size = math.ceil(len(ratings) * (1 - (self._iteration / (self._iteration + self._poolshrink))))
+			if p_pool_size < len(ratings):
+				print(f'shrinking pool from {len(ratings)} to {p_pool_size}')
+				ratings = ratings[:p_pool_size]
 		
-		participants = list(all_scores.keys())
-		random.shuffle(participants)
-		matchups = []
-		for i in range(0, len(participants) - 1, 2):
-			matchups.append((participants[i], participants[i+1]))
-		if(len(participants) % 2 != 0):
-			matchups.append((participants[-1], random.choice(participants[:-1])))
-		
-		uncertainties = []
-		for a, b in matchups:
-			p_a_win = p_a(all_scores[a], all_scores[b])
-			uncertainty = 1 - abs(0.5 - p_a_win)
-			deviation = abs(STARTRATING - all_scores[a]) + abs (STARTRATING - all_scores[b])
-			dequeue_events = self._dequeue_events.get(a,0) + self._dequeue_events.get(b,0)
-			uncertainties.append(((a, b), uncertainty, deviation, dequeue_events))
-		random.shuffle(uncertainties)
-		
-		# sorting by minimial seen count, then uncertainty, then how close they are to the startrating
-		uncertainties.sort(key = lambda x: x[2], reverse = False)
-		uncertainties.sort(key = lambda x: x[1], reverse = True)
-		uncertainties.sort(key = lambda x: x[3], reverse = False)
+		tiers = {1: [], 2: [], 3: [], 4: []}
+		elo_min = min(x[1] for x in ratings)
+		elo_step = (max(x[1] for x in ratings) + 1 - elo_min) / len(tiers)
+		for k in tiers.keys():
+			tiers[k] = [x[0] for x in ratings if elo_min + ((k-1) * elo_step) <= x[1] < elo_min + ((k) * elo_step)]
 
-		self._temporary_stack = []
-		for matchup in uncertainties[:self._session_length]:
-			self._temporary_stack.append(matchup[0])
-		if uncertainties[0][1] < 1.0:
-			cherrypy.log(f'maximum uncertainty is now {uncertainties[0][1]} @ iteration {self._iteration}')
+		matchups = []
+		leftovers = []
+		for tier, items in tiers.items():
+			candidates = leftovers + items
+			leftovers = []
+			random.shuffle(candidates)
+			while len(candidates) >= 2:
+				matchups.append((candidates.pop(), candidates.pop()))
+			if(candidates):
+				leftovers.extend(candidates)
+		if leftovers:
+			for leftover in leftovers:
+				matchups.append((leftover, random.choice([x[0] for x in ratings if x[0] != leftover])))
+				print(f'pairing leftover with random item:')
+				print(f'  {matchups[-1]}')
+
+		if(self._session_length > 0):
+			matchups = matchups[:self._session_length]
+		self._temporary_stack = matchups[::-1]
 
 	def stack_remaining(self):
 		return len(self._temporary_stack)
@@ -140,7 +142,7 @@ class Elo_Tournament:
 	def menu_div(self, tag: str = 'Clean URL and Continue Rating') -> str:
 		return f'''
 <div class="full-width-container">
-	<p align="center"><a href="/results?count=50">See Results</a> - <a href="/">{tag}</a> - <a href="/script">Purge</a> - {self.items.stack_remaining()} remaining</p>
+	<p align="center"><a href="/results">See Results</a> - <a href="/">{tag}</a> - <a href="/script">Purge</a> - {self.items.stack_remaining()} remaining</p>
 </div>'''
 
 	@cherrypy.expose 
@@ -183,6 +185,11 @@ class Elo_Tournament:
 		else:
 			element2 = f'<img src="static/{im2}"/>'
 
+		if count:
+			rc_clause = f'&count={count}'
+		else:
+			rc_clause = ''
+
 		template = f'''<!DOCTYPE html>
 <html>
 <head>
@@ -207,7 +214,7 @@ class Elo_Tournament:
 					break;
 				case 40: //down
 				case 83: //s
-					window.location.href="/results?count=50"
+					window.location.href="/results{rc_clause}"
 					break;
 				case 46: //del
 					window.location.href="/?a={im2}&b={im1}&result=-1.0"
@@ -251,7 +258,7 @@ class Elo_Tournament:
 <body>
 	{self.menu_div('Return to Scoring')}
 	<div class="code-block">
-		<pre># you can call this page with different ?offset= arguments to preserve more files from deletion. offset: <a href="/script?offset=40">40</a> - <a href="/script?offset=60">60</a> - <a href="/script?offset=80">80</a> - <a href="/script?offset=100">100</a></pre>
+		<pre># you can call this page with different ?offset= arguments to preserve more files from deletion - currently {offset}. offset: <a href="/script?offset=10">10</a> - <a href="/script?offset=20">20</a> - <a href="/script?offset=30">30</a> - <a href="/script?offset=40">40</a> - <a href="/script?offset=60">60</a> - <a href="/script?offset=80">80</a> - <a href="/script?offset=100">100</a></pre>
 		<pre onclick="selectText(this)">{commands}</pre>
 	</div>
 </body>
@@ -468,7 +475,8 @@ if __name__ == "__main__":
 	global FILE_LOCATION
 	parser = ArgumentParser()
 	parser.add_argument("-p", "--port", dest="port", default=9090, type=int, help="port to run the server on", metavar="PORTNUM")
-	parser.add_argument("-s", "--session", dest="session", default=10000, type=int, help="number of image pairs to test before refilling the stack", metavar="SESSION")
+	parser.add_argument("-l", "--poolshrink", dest="poolshrink", default=50, type=int, help="k value for poolshrinking (disable with -1)", metavar="POOLSHRINK")
+	parser.add_argument("-s", "--session", dest="session", default=-1, type=int, help="number of image pairs to test before refilling the stack", metavar="SESSION")
 	parser.add_argument("-d", "--dbname", dest="dbname", default="scores.shelf", type=str, help="name of ratings database file", metavar="NAME")
 	parser.add_argument("-r", "--prefilled", dest="prefilled", action="store_true", help="whether the ratings database file has been prepopulated")
 	parser.add_argument("-b", "--basedir", default=".", type=str, help="the folder to read files from if not using a prepopulated ratings database file", metavar="FOLDER")
@@ -476,7 +484,7 @@ if __name__ == "__main__":
 	args = parser.parse_args()
 	
 	basedir = os.path.abspath(args.basedir)
-	itemcollection = Depletable_Stack(basedir, args.session, args.dbname, args.prefilled)
+	itemcollection = Depletable_Stack(basedir, args.session, args.dbname, args.prefilled, args.poolshrink)
 
 	cherry_config = {
 		'global': {
