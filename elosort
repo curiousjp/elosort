@@ -60,21 +60,22 @@ class Depletable_Stack:
 		self.shuffle()
 
 	def shuffle(self):
-		self._iteration += 1
-		
 		# get_all_ratings already sorts high to low
 		ratings = get_all_ratings(self._dbl)
+		print(f'~~ ratings: {len(ratings)}')
 		if(self._poolshrink > 0):
 			p_pool_size = math.ceil(len(ratings) * (1 - (self._iteration / (self._iteration + self._poolshrink))))
 			if p_pool_size < len(ratings):
 				print(f'shrinking pool from {len(ratings)} to {p_pool_size}')
 				ratings = ratings[:p_pool_size]
+		self._iteration += 1
 		
 		tiers = {1: [], 2: [], 3: [], 4: []}
 		elo_min = min(x[1] for x in ratings)
 		elo_step = (max(x[1] for x in ratings) + 1 - elo_min) / len(tiers)
 		for k in tiers.keys():
 			tiers[k] = [x[0] for x in ratings if elo_min + ((k-1) * elo_step) <= x[1] < elo_min + ((k) * elo_step)]
+			print(f'~~~ tier {k}, items: {len(tiers[k])}')
 
 		matchups = []
 		leftovers = []
@@ -92,8 +93,11 @@ class Depletable_Stack:
 				print(f'pairing leftover with random item:')
 				print(f'  {matchups[-1]}')
 
+		print(f'~~ matchups: {len(matchups)}')
+
 		if(self._session_length > 0):
 			matchups = matchups[:self._session_length]
+		print(f'~~ stack size: {len(matchups)}')
 		self._temporary_stack = matchups[::-1]
 
 	def stack_remaining(self):
@@ -200,18 +204,22 @@ class Elo_Tournament:
 			var key = ( window.event ) ? event.keyCode : e.keyCode;
 
 			switch( key ) {{
+				case 33:
 				case 37: //left
 				case 65: //a
 					window.location.href="/?a={im1}&b={im2}&result=1.0"
 					break;
+				case 116:
 				case 38: //up
 				case 87: //w
 					window.location.href="/?a={im1}&b={im2}&result=0.5"
 					break;
+				case 34:
 				case 39: //right
 				case 68: //d
 					window.location.href="/?a={im2}&b={im1}&result=1.0"
 					break;
+				case 66:
 				case 40: //down
 				case 83: //s
 					window.location.href="/results{rc_clause}"
@@ -438,6 +446,23 @@ class Elo_Tournament:
 	flex-direction: column;
 	align-items: center;
 	padding: 15px;
+}
+
+@media (max-aspect-ratio: 3/4) {
+	.twoup {
+		flex-direction: column; /* Switch to vertical layout */
+		align-items: center; /* Center align the images vertically */
+	}
+
+	.twoup img, .twoup video {
+		width: 100%; /* Images/videos take full width on smaller screens */
+		height: auto; /* Maintain aspect ratio */
+	}
+
+	.gallery-item {
+		width: 90%; /* Add some margin on the sides */
+		margin-bottom: 20px; /* Add space between vertically stacked items */
+	}
 }
 
 .prestige {
