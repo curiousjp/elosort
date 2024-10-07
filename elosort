@@ -233,9 +233,9 @@ class Elo_Tournament:
 </head>
 <body>
 	{self.menu_div('Punt')}
-	<div class="twoup">
-		<div class="gallery-item"><a href="/?a={im1}&b={im2}&result=1">{element1}</a></div>
-		<div class="gallery-item"><a href="/?a={im2}&b={im1}&result=1">{element2}</a></div>
+	<div class="scoring-area">
+		<div class="scoring-item"><a href="/?a={im1}&b={im2}&result=1">{element1}</a></div>
+		<div class="scoring-item"><a href="/?a={im2}&b={im1}&result=1">{element2}</a></div>
 	</div>
 </body>
 </html>
@@ -401,99 +401,136 @@ class Elo_Tournament:
 	@cherrypy.expose
 	def stylesheet(self) -> str:
 		cherrypy.response.headers['Content-Type'] = 'text/css'
-		return '''body {
-	align-items: center;
-	background-color: #f4f4f4;
-	color: #333;
-	display: flex;
-	flex-direction: column;
-	font-family: 'Arial', sans-serif;
-	height: 100vh;
-	line-height: 1.6;
-	margin: 0;
-	overflow-x: hidden;
-	padding: 20px;
+		return '''
+/* reset some basic styles */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
 }
 
-.twoup {
-	display: flex;
+/* full-page layout */
+html, body {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+}
+
+/* menu styles */
+.full-width-container {
+    background-color: #f0f0f0;
+    padding: 5px;
+    text-align: center;
+    width: 100%;
+}
+
+/* code display */
+.code-block {
+    background-color: #d0d0d0;
+    padding: 10px;
+    width: 98%
+}
+
+/* the scoring area, under the menu */
+.scoring-area {
+    display: flex;
+    flex-grow: 1;
+    width: 100%;
+    height: 0; /* sets the 'default' height that flex-grow then works around */
+}
+
+/* visual items default to side-by-side in landscape mode */
+.scoring-item {
+    flex-grow: 1;
+    display: flex;
+    align-items: center;
+    overflow: hidden;
+    padding: 15px; /* Padding around the visual items */
+    background-color: #fff;
+    border: 1px solid #ddd;
+    border-radius: 5px;
+    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1); /* Subtle shadow */
+    margin: 10px; /* Adds space between items */
+	pointer-events: none; /* avoid click events on the inflated <a> */
+}
+
+/* Left item should be right-aligned */
+.scoring-item:first-child {
+    justify-content: flex-end;
+}
+
+/* Right item should be left-aligned */
+.scoring-item:last-child {
+    justify-content: flex-start;
+}
+
+/* inflate the hyperlink so the image / video can inherit height */
+.scoring-item a {
+	display: inline-flex;
 	justify-content: center;
-	width: 100%;
-}
-
-.twoup img, .twoup video {
-	border-radius: 5px;
+	align-items: center;
 	height: 100%;
-	max-height: 80vh;
-	object-fit: contain;
-	width: auto;
+	width: 100%;
 }
 
+/* ensure the img or video fills the non-layout dimension */
+.scoring-item img, .scoring-item video {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+    border-radius: 5px;
+	pointer-events: auto;
+}
+
+/* vertical stacking for portrait screens */
+@media (max-aspect-ratio: 1/1) {
+    .scoring-area {
+        flex-direction: column;
+    }
+
+    /* Remove alignment adjustments in vertical mode */
+    .scoring-item:first-child,
+    .scoring-item:last-child {
+        justify-content: center;
+    }
+}
+
+/* grid for the review screen */
 .gallery {
-	display: grid;
-	grid-gap: 20px;
-	grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-	padding: 20px;
-	width: 100%;
+    display: grid;
+    grid-gap: 20px;
+    grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+    padding: 20px;
+    width: 100%;
 }
 
 .gallery-item {
-	background-color: #fff;
-	border: 1px solid #ddd;
-	border-radius: 5px;
-	box-shadow: 0 5px 15px rgba(0,0,0,0.1);
-	display: flex;
-	flex-direction: column;
-	align-items: center;
-	padding: 15px;
-}
-
-@media (max-aspect-ratio: 3/4) {
-	.twoup {
-		flex-direction: column; /* Switch to vertical layout */
-		align-items: center; /* Center align the images vertically */
-	}
-
-	.twoup img, .twoup video {
-		width: 100%; /* Images/videos take full width on smaller screens */
-		height: auto; /* Maintain aspect ratio */
-	}
-
-	.gallery-item {
-		width: 90%; /* Add some margin on the sides */
-		margin-bottom: 20px; /* Add space between vertically stacked items */
-	}
+    background-color: #fff;
+    border: 1px solid #ddd;
+    border-radius: 5px;
+    box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 15px;
 }
 
 .prestige {
-	background-color: #fff3e0;
+    background-color: #fff3e0;
 }
 
 .gallery-item img, .gallery-item video {
-	border-radius: 5px;
-	height: auto;
-	object-fit: cover;
-	width: 100%;
+    border-radius: 5px;
+    height: auto;
+    object-fit: cover;
+    width: 100%;
 }
 
 gallery-item div.score {
-	color: #007bff;
-	font-size: 18px;
-	margin-top: 10px;
+    color: #007bff;
+    font-size: 18px;
+    margin-top: 10px;
 }
-
-.full-width-container {
-	background-color: #f0f0f0;
-	padding: 5px;
-	text-align: center;
-	width: 100%;
-}
-
-.code-block {
-	background-color: #d0d0d0;
-	padding: 10px;
-	width: 98%;
-}	
 '''
 
 if __name__ == "__main__":
