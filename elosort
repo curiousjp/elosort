@@ -6,32 +6,73 @@ from pathlib import Path
 from argparse import ArgumentParser
 from typing import Optional, Set, Tuple, List
 
+import json
 import os
 import random
 import math
 import shelve
+import sqlite3
 
 STARTRATING = 1000
+TABLESCHEMA = '''CREATE TABLE IF NOT EXISTS shelf_data (key TEXT PRIMARY KEY, value REAL)'''
 
-def set_rating(item: str, score: float, filename: str) -> None:
-	with shelve.open(filename) as db:
-		db[item] = score
+def set_ratings(items: dict, filename: str) -> None:
+	conn = sqlite3.connect(filename)
+	cursor = conn.cursor()
+	try:
+		cursor.execute(TABLESCHEMA)
+		cursor.executemany('''INSERT OR REPLACE INTO shelf_data (key, value) VALUES (?, ?)''', items.items())
+		conn.commit()
+	except sqlite3.Error as e:
+		print(f'SQLite error occurred: {e}')
+	finally:
+		conn.close()
 
-def set_ratings(items: List[Tuple[str,float]], filename: str) -> None:
-	with shelve.open(filename) as db:
-		for item_name, item_score in items:
-			db[item_name] = item_score
+def get_all_ratings(filename: str) -> List[Tuple[str, float]]:
+	conn = sqlite3.connect(filename)
+	cursor = conn.cursor()
+	try:
+		cursor.execute(TABLESCHEMA)
+		conn.commit()
 
-def get_rating(item: str, filename: str) -> float:
-	with shelve.open(filename) as db:
-		return db.get(item, STARTRATING)
-
-def get_all_ratings(filename: str, limit: Optional[Set[int]] = None, offset: int = 0) -> List[Tuple[str, float]]:
-	with shelve.open(filename) as db:
-		sorted_scores = sorted(db.items(), key = lambda x: x[1], reverse = True)
-		return sorted_scores[offset:offset+limit if limit else None]
+		cursor.execute('''SELECT key, value FROM shelf_data ORDER BY value DESC''')
+		return cursor.fetchall()
+	except sqlite3.Error as e:
+		print(f'SQLite error occurred: {e}')
+	finally:
+		conn.close()
 
 def clean_shelf(preserved_keys: Set[str], filename: str) -> None:
+	conn = sqlite3.connect(filename)
+	cursor = conn.cursor()
+	try:
+		cursor.executemany('''INSERT OR IGNORE INTO shelf_data (key, value) VALUES(?, ?)''', [(k, STARTRATING) for k in preserved_keys])
+		conn.commit()
+
+		cursor.execute('SELECT key FROM shelf_data')
+		all_keys = {row[0] for row in cursor.fetchall()}
+		keys_to_remove = list(all_keys - preserved_keys)
+		if keys_to_remove:
+			print('About to remove the following keys from the database:')
+			for k in keys_to_remove:
+				print(f' - {k}')
+			_ = input('Either press enter to continue or ctrl-C now to cancel this operation.')
+		else:
+			return
+		# batch our keys
+		for i in range(0, len(keys_to_remove), 900):
+			batch = keys_to_remove[i:i+900]
+			placeholders = ', '.join('?' for _ in batch)
+			cursor.execute(f'''DELETE FROM shelf_data WHERE key IN ({placeholders}))''')
+		conn.commit()
+		print(f'Pruned {len(keys_to_remove)} keys.')
+	except sqlite3.Error as e:
+		print(f'SQLite error occured: {e}')
+	finally:
+		conn.close()
+
+	print('about to remove ')
+	conn = sqlite3.connect(filename)
 	with shelve.open(filename) as db:
 		keys_to_delete = [key for key in db.keys() if key not in preserved_keys]
 		if keys_to_delete:
@@ -43,6 +84,33 @@ def clean_shelf(preserved_keys: Set[str], filename: str) -> None:
 		cherrypy.log(f'setting a default value for {len(keys_to_default)} keys')
 		for key in keys_to_default:
 			db[key] = STARTRATING
+
+def wrap_media(fn, alt = None):
+	if alt:
+		alt_text = f'alt="{alt}"'
+	else:
+		alt_text = ''
+	if(fn.endswith('.mp4')):
+		return f'<video controls autoplay loop muted data-path="{fn}"><source src="static/{fn}" type="video/mp4" {alt_text}/></video>'
+	else:
+		return f'<img data-path="{fn}" src="static/{fn}" {alt_text}/>'
+
+def migrate_shelf_to_sqlite(filename):
+	file_path = Path(filename)
+	if file_path.suffix == '.sqlite':
+		return filename
+	sqlite_path = file_path.with_suffix('.sqlite')
+	with shelve.open(str(file_path)) as shelf:
+		if not isinstance(shelf, shelve.Shelf):
+			raise ValueError(f"{filename} is not a valid shelf file.")
+		conn = sqlite3.connect(str(sqlite_path))
+		cursor = conn.cursor()
+		cursor.execute(TABLESCHEMA)
+		cursor.executemany('''INSERT OR REPLACE INTO shelf_data (key, value) VALUES (?, ?)''', shelf.items())
+		conn.commit()
+		conn.close()
+		print(f'** Migrated shelf from {filename} to {sqlite_path}.')
+		return str(sqlite_path)  # Return the path to the new SQLite file
 
 class Depletable_Stack:
 	def __init__(self, from_folder: str, session_length: int, db_location: str, prefilled: bool, poolshrink: int, patterns: List[str] = ['*.jpg', '*.png', '*.mp4', '*.gif']):
@@ -102,6 +170,9 @@ class Depletable_Stack:
 
 	def stack_remaining(self):
 		return len(self._temporary_stack)
+	
+	def view_stack(self):
+		return self._temporary_stack[:]
 
 	def peek(self):
 		if len(self._temporary_stack) == 0:
@@ -119,38 +190,156 @@ class Elo_Tournament:
 		self.items = items
 		self._dbl = db_location
 
-	def score_match(self, a: str, b: str, a_score: float, b_score: float, k: float = 16):
-		"""Special case here for 0, 0 - punish both candidates with a loss"""
+	def score_match(self, a: str, b: str, ratings: dict, a_score: float, b_score: float, k: float = 16):
+		"""Returns the new ratings of a and b. Special case here for 0, 0 - punish both candidates with a loss"""
+		a_rating = ratings.get(a, STARTRATING)
+		b_rating = ratings.get(b, STARTRATING)
 
-		# draw
-		if a == b and a == 0.5:
-			self.items.dequeue((a, b))
-			return
+		if a_score == 0.5 and b_score == 0.5:
+			return (a_rating, b_rating)
 
-		a_rating = get_rating(a, self._dbl)
-		b_rating = get_rating(b, self._dbl)
-	
 		a_expected = 1.0 / (1.0 + (10.0 ** ((b_rating - a_rating) / 400.0)))
 		b_expected = 1.0 / (1.0 + (10.0 ** ((a_rating - b_rating) / 400.0)))
 
 		new_a_rating = a_rating + k * (a_score - a_expected)
 		new_b_rating = b_rating + k * (b_score - b_expected)
 
-		set_ratings([
-			(a, new_a_rating),
-			(b, new_b_rating),
-		], self._dbl)
-		self.items.dequeue((a, b))
-		self.items.dequeue((b, a))
+		return (new_a_rating, new_b_rating)
 
 	def menu_div(self, tag: str = 'Clean URL and Continue Rating') -> str:
 		return f'''
 <div class="full-width-container">
-	<p align="center"><a href="/results">See Results</a> - <a href="/">{tag}</a> - <a href="/script">Purge</a> - {self.items.stack_remaining()} remaining</p>
+	<p align="center"><a href="/results">See Results</a> - <a href="/">{tag}</a> - <a href="/massvote">Mass Vote</a> - <a href="/script">Purge</a> - {self.items.stack_remaining()} remaining</p>
 </div>'''
+
+	@cherrypy.expose
+	def massvote(self, votes = []) -> str:
+		score_data = get_all_ratings(self._dbl)
+		ratings = {k:v for (k,v) in score_data}
+		ratings_dirty = False
+
+		if isinstance(votes, str):
+			votes = [votes]
+		for vote in votes:
+			vote_data = json.loads(vote)
+			a = vote_data['a']
+			b = vote_data['b']
+			if(vote_data['result'] == 1):
+				a_result = 1;
+				b_result = 0;
+			elif(vote_data['result'] == 0):
+				a_result = 0;
+				b_result = 1;
+			else:
+				continue
+			new_a_rating, new_b_rating = self.score_match(a, b, ratings, a_result, b_result)
+			ratings_dirty = True
+			ratings[a] = new_a_rating
+			ratings[b] = new_b_rating
+			self.items.dequeue((a, b))
+			self.items.dequeue((b, a))
+		
+		if ratings_dirty:
+			set_ratings(ratings, self._dbl)
+
+		template = f'''<!DOCTYPE html>
+<html>
+<head>
+	<link rel="stylesheet" href="/stylesheet" type="text/css">
+	<script language="javascript" type="text/javascript">
+
+		document.onkeyup = KeyPressed;
+		function KeyPressed( e ) {{
+			var key = (window.event) ? event.keyCode : e.keyCode;
+			switch(key) {{
+				case 90: //z
+					scrollToNext();
+					break;
+			}}
+		}}
+
+        function scrollToNext() {{
+            const scoringAreas = document.querySelectorAll('.scoring-area');
+            for (let i = 0; i < scoringAreas.length; i++) {{
+                const rect = scoringAreas[i].getBoundingClientRect();
+                if (rect.top > 1) {{
+                    scoringAreas[i].scrollIntoView({{behavior: 'smooth', block: 'start'}});
+                    break;
+                }}
+            }}
+        }}
+
+		function selectImage(selectedItem) {{
+		    let container = selectedItem.parentNode;
+		    container.querySelectorAll('.scoring-item').forEach(function(item) {{
+            	item.classList.remove('prestige');
+			}});
+			selectedItem.classList.add('prestige');
+		}}
+
+	    function submitVotes() {{
+			let form = document.getElementById('massVoteForm');
+			form.innerHTML = '';
+			document.querySelectorAll('.scoring-area').forEach(function(matchup) {{
+				let items = matchup.querySelectorAll('.scoring-item');
+	            let item1 = items[0].querySelector('img, video');
+    	        let item2 = items[1].querySelector('img, video');
+	            let selectedItem = matchup.querySelector('.prestige img, .prestige video');
+            	if (selectedItem) {{
+					let result = selectedItem === item1 ? 1.0 : 0.0;
+					let im1Src = item1.dataset.path;
+					let im2Src = item2.dataset.path;
+			
+					form.appendChild(createHiddenInput('votes', JSON.stringify({{ a: im1Src, b: im2Src, result: result }})));
+				}}
+	        }});
+        	form.submit();
+		}}
+
+		function createHiddenInput(name, value) {{
+			let input = document.createElement('input');
+			input.type = 'hidden';
+			input.name = name;
+			input.value = value;
+			return input;
+		}}
+	</script>
+</head>
+<body class='massvote'>
+    <form id='massVoteForm' action='/massvote' method='POST'>
+	</form>
+	{self.menu_div('Return to Single Scoring')}'''
+		stack_copy = self.items.view_stack()
+		if len(stack_copy) == 0:
+			self.items.peek()
+			stack_copy = self.items.view_stack()
+		for pairing in self.items.view_stack():
+			im1, im2 = pairing
+			element1 = wrap_media(im1, ratings.get(im1, STARTRATING))
+			element2 = wrap_media(im2, ratings.get(im2, STARTRATING))
+
+			template += f'''
+	<div class="scoring-area">
+		<div class="scoring-item" onclick="selectImage(this)">{element1}</div>
+		<div class="scoring-item" onclick="selectImage(this)">{element2}</div>
+	</div>'''
+		template += f'''
+    <div class='full-width-container'>
+	    <button onclick='submitVotes()'>Submit Votes</button>
+	</div>
+</body>
+</html>
+'''
+		return template
+
+
 
 	@cherrypy.expose 
 	def index(self, a = None, b = None, result = None, force_im1 = None, force_im2 = None, count = None) -> str:
+		score_data = get_all_ratings(self._dbl)
+		ratings = {k:v for (k,v) in score_data}
+		ratings_dirty = False
+
 		if a and b and result:
 			try:
 				# result value here is a's result
@@ -169,9 +358,17 @@ class Elo_Tournament:
 				else:
 					# draw
 					a_result, b_result = 0.5, 0.5
-				self.score_match(a, b, a_result, b_result)
+				new_a_rating, new_b_rating = self.score_match(a, b, ratings, a_result, b_result)
+				ratings_dirty = True
+				ratings[a] = new_a_rating
+				ratings[b] = new_b_rating
+				self.items.dequeue((a, b))
+				self.items.dequeue((b, a))
 			except ValueError as ve:
 				return f'ValueError: {repr(ve)}'
+
+		if ratings_dirty:
+			set_ratings(ratings, self._dbl)
 
 		# we can now peek safely as the item is not dequeued until it is voted on
 		im1, im2 = self.items.peek()
@@ -180,14 +377,8 @@ class Elo_Tournament:
 		if force_im2:
 			im2 = force_im2
 
-		if(im1.endswith('.mp4')):
-			element1 = f'<video controls autoplay loop muted><source src="static/{im1}" type="video/mp4"/></video>'
-		else:
-			element1 = f'<img src="static/{im1}"/>'
-		if(im2.endswith('.mp4')):
-			element2 = f'<video controls autoplay loop muted><source src="static/{im2}" type="video/mp4"/></video>'
-		else:
-			element2 = f'<img src="static/{im2}"/>'
+		element1 = wrap_media(im1, ratings.get(im1, STARTRATING))
+		element2 = wrap_media(im2, ratings.get(im2, STARTRATING))
 
 		if count:
 			rc_clause = f'&count={count}'
@@ -204,22 +395,22 @@ class Elo_Tournament:
 			var key = ( window.event ) ? event.keyCode : e.keyCode;
 
 			switch( key ) {{
-				case 33:
+				case 33: //pageup <-- kensington presenter
 				case 37: //left
 				case 65: //a
 					window.location.href="/?a={im1}&b={im2}&result=1.0"
 					break;
-				case 116:
+				case 116://f5 <-- kensington presenter
 				case 38: //up
 				case 87: //w
 					window.location.href="/?a={im1}&b={im2}&result=0.5"
 					break;
-				case 34:
+				case 34: //page down <-- kensington presenter
 				case 39: //right
 				case 68: //d
 					window.location.href="/?a={im2}&b={im1}&result=1.0"
 					break;
-				case 66:
+				case 66: //b <-- kensington presenter
 				case 40: //down
 				case 83: //s
 					window.location.href="/results{rc_clause}"
@@ -245,7 +436,8 @@ class Elo_Tournament:
 	@cherrypy.expose
 	def script(self, offset: int = 20) -> str:
 		offset = int(offset)
-		results = get_all_ratings(self._dbl, limit = None, offset = offset)
+		results = get_all_ratings(self._dbl)
+		results = results[offset:]
 		commands = '\n'.join([f'rm "{item[0]}" # {item[1]}' for item in results])
 		template = f'''<!DOCTYPE html>
 <html>
@@ -276,28 +468,35 @@ class Elo_Tournament:
 	
 	@cherrypy.expose
 	def results(self, start: int = 0, count: int = 0, switch_a: str = None, switch_b: str = None) -> str:
+		score_data = get_all_ratings(self._dbl)
+		ratings = {k:v for (k,v) in score_data}
+		ratings_dirty = False
+
 		if switch_a and switch_b:
-			old_a_rating = get_rating(switch_a, self._dbl)
-			old_b_rating = get_rating(switch_b, self._dbl)
-			set_ratings([
-				(switch_a, old_b_rating),
-				(switch_b, old_a_rating),
-			], self._dbl)
+			old_a_rating = ratings.get(switch_a, STARTRATING)
+			old_b_rating = ratings.get(switch_b, STARTRATING)
+			ratings[switch_a] = old_b_rating
+			ratings[switch_b] = old_a_rating
+			score_data = sorted(score_data, key=lambda x: x[1], reverse=True)
+			ratings_dirty = True
+
+		if ratings_dirty:
+			set_ratings(ratings, self._dbl)
 
 		start = max(0, int(start))
 		count = max(0, int(count))
 
-		results = get_all_ratings(self._dbl, limit = count if count > 0 else None, offset = start)
-		if count == 0:
-			count = len(results)
+		if start > 0 and count == 0:
+			results = score_data[start:]
+		elif start > 0 and count > 0:
+			results = score_data[start:start+count]
+		else:
+			results = score_data[:]
 
 		gallery_items = []
 		for index, x in enumerate(results):
-			if(x[0].endswith('.mp4')):
-				element = f'<video loop muted data-path="{x[0]}"><source src="static/{x[0]}" type="video/mp4"/>'
-			else:
-				element = f'<img data-path="{x[0]}" src="static/{x[0]}">'
-			gallery_items.append(f'<div class="gallery-item {"prestige" if index <20 else ""}">{element}<div class="score">Score: {x[1]:.3f}</div></div>')
+			element = wrap_media(x[0])
+			gallery_items.append(f'<div class="gallery-item {"prestige" if index < 20 else ""}">{element}<div class="score">Score: {x[1]:.3f}</div></div>')
 		gallery_string = '\n'.join(gallery_items)
 
 		template = f'''<!DOCTYPE html>
@@ -438,6 +637,9 @@ html, body {
     width: 100%;
     height: 0; /* sets the 'default' height that flex-grow then works around */
 }
+.massvote .scoring-area {
+	height: auto; /* reset the height so we can go down the page */
+}
 
 /* visual items default to side-by-side in landscape mode */
 .scoring-item {
@@ -452,6 +654,9 @@ html, body {
     box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1); /* Subtle shadow */
     margin: 10px; /* Adds space between items */
 	pointer-events: none; /* avoid click events on the inflated <a> */
+}
+.massvote .scoring-item {
+    pointer-events: auto;
 }
 
 /* Left item should be right-aligned */
@@ -484,7 +689,7 @@ html, body {
 
 /* vertical stacking for portrait screens */
 @media (max-aspect-ratio: 1/1) {
-    .scoring-area {
+    .scoring-area, {
         flex-direction: column;
     }
 
@@ -492,6 +697,11 @@ html, body {
     .scoring-item:first-child,
     .scoring-item:last-child {
         justify-content: center;
+    }
+}
+.massvote @media (max-aspect-ratio: 1/1) {
+    .scoring-area, {
+        flex-direction: row;
     }
 }
 
@@ -516,7 +726,7 @@ html, body {
 }
 
 .prestige {
-    background-color: #fff3e0;
+    background-color: #FFCC66;
 }
 
 .gallery-item img, .gallery-item video {
@@ -544,6 +754,8 @@ if __name__ == "__main__":
 	parser.add_argument("-b", "--basedir", default=".", type=str, help="the folder to read files from if not using a prepopulated ratings database file", metavar="FOLDER")
 
 	args = parser.parse_args()
+
+	args.dbname = migrate_shelf_to_sqlite(args.dbname)
 	
 	basedir = os.path.abspath(args.basedir)
 	itemcollection = Depletable_Stack(basedir, args.session, args.dbname, args.prefilled, args.poolshrink)
