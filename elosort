@@ -7,11 +7,12 @@ from argparse import ArgumentParser
 from typing import Optional, Set, Tuple, List
 
 import json
+import math
 import os
 import random
-import math
 import shelve
 import sqlite3
+import sys
 
 STARTRATING = 1000
 TABLESCHEMA = '''CREATE TABLE IF NOT EXISTS shelf_data (key TEXT PRIMARY KEY, value REAL)'''
@@ -87,7 +88,7 @@ def clean_shelf(preserved_keys: Set[str], filename: str) -> None:
 
 def wrap_media(fn, alt = None):
 	if alt:
-		alt_text = f'alt="{alt}"'
+		alt_text = f'title="{alt}"'
 	else:
 		alt_text = ''
 	if(fn.endswith('.mp4')):
@@ -110,6 +111,8 @@ def migrate_shelf_to_sqlite(filename):
 		conn.commit()
 		conn.close()
 		print(f'** Migrated shelf from {filename} to {sqlite_path}.')
+		#print(f'** Please restart with the new path.')
+		#sys.exit(0)
 		return str(sqlite_path)  # Return the path to the new SQLite file
 
 class Depletable_Stack:
@@ -160,6 +163,11 @@ class Depletable_Stack:
 				matchups.append((leftover, random.choice([x[0] for x in ratings if x[0] != leftover])))
 				print(f'pairing leftover with random item:')
 				print(f'  {matchups[-1]}')
+
+		test_pool = set(x[0] for x in ratings)
+		test_pool -= set(x[0] for x in matchups)
+		test_pool -= set(x[1] for x in matchups)
+		print(f'remaining test pool is: {test_pool}')
 
 		print(f'~~ matchups: {len(matchups)}')
 
@@ -477,7 +485,7 @@ class Elo_Tournament:
 			old_b_rating = ratings.get(switch_b, STARTRATING)
 			ratings[switch_a] = old_b_rating
 			ratings[switch_b] = old_a_rating
-			score_data = sorted(score_data, key=lambda x: x[1], reverse=True)
+			score_data = sorted(ratings.items(), key=lambda x: x[1], reverse=True)
 			ratings_dirty = True
 
 		if ratings_dirty:
