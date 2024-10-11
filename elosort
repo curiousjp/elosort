@@ -47,6 +47,8 @@ def clean_shelf(preserved_keys: Set[str], filename: str) -> None:
 	conn = sqlite3.connect(filename)
 	cursor = conn.cursor()
 	try:
+		cursor.execute(TABLESCHEMA)
+		conn.commit()
 		cursor.executemany('''INSERT OR IGNORE INTO shelf_data (key, value) VALUES(?, ?)''', [(k, STARTRATING) for k in preserved_keys])
 		conn.commit()
 
@@ -71,20 +73,6 @@ def clean_shelf(preserved_keys: Set[str], filename: str) -> None:
 		print(f'SQLite error occured: {e}')
 	finally:
 		conn.close()
-
-	print('about to remove ')
-	conn = sqlite3.connect(filename)
-	with shelve.open(filename) as db:
-		keys_to_delete = [key for key in db.keys() if key not in preserved_keys]
-		if keys_to_delete:
-			cherrypy.log(f'about to remove {len(keys_to_delete)} keys (of {len(db.keys())}) from {filename} - is this correct?')
-			_ = input('Press enter to continue or ctrl-C to exit.')
-		for key in keys_to_delete:
-			del db[key]
-		keys_to_default = [key for key in preserved_keys if key not in db.keys()]
-		cherrypy.log(f'setting a default value for {len(keys_to_default)} keys')
-		for key in keys_to_default:
-			db[key] = STARTRATING
 
 def wrap_media(fn, alt = None):
 	if alt:
