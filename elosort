@@ -182,8 +182,9 @@ class Depletable_Stack:
 			self._temporary_stack.remove(pair)
 
 class Elo_Tournament:
-	def __init__(self, items: Depletable_Stack, db_location: str):
+	def __init__(self, items: Depletable_Stack, db_location: str, script_text: str = None):
 		self.items = items
+		self.script_text = script_text
 		self._dbl = db_location
 
 	def score_match(self, a: str, b: str, ratings: dict, a_score: float, b_score: float, k: float = 16):
@@ -243,8 +244,8 @@ class Elo_Tournament:
 <head>
 	<link rel="stylesheet" href="/stylesheet" type="text/css">
 	<script language="javascript" type="text/javascript">
-
-		document.onkeyup = KeyPressed;
+		{self.script_text}
+		document.addEventListener('keyup', KeyPressed);
 		function KeyPressed( e ) {{
 			var key = (window.event) ? event.keyCode : e.keyCode;
 			switch(key) {{
@@ -386,7 +387,8 @@ class Elo_Tournament:
 <head>
 	<link rel="stylesheet" href="/stylesheet" type="text/css">
 	<script language="javascript" type="text/javascript">
-		document.onkeyup = KeyPressed;
+		{self.script_text}
+		document.addEventListener('keyup', KeyPressed);
 		function KeyPressed( e ) {{
 			var key = ( window.event ) ? event.keyCode : e.keyCode;
 
@@ -440,6 +442,7 @@ class Elo_Tournament:
 <head>
 	<link rel="stylesheet" href="/stylesheet" type="text/css">
 	<script language="javascript" type="text/javascript">
+		{self.script_text}
 		function selectText(element) {{
 			if(window.getSelection) {{
 				const selection = window.getSelection();
@@ -505,6 +508,7 @@ class Elo_Tournament:
 		}}
 	</style>
 	<script language="javascript" type="text/javascript">
+		{self.script_text}
 		document.addEventListener('DOMContentLoaded', () => {{
 			const divs = document.querySelectorAll('div.gallery-item');
 			const contest_link = document.getElementById('contestLink');
@@ -685,19 +689,18 @@ html, body {
 
 /* vertical stacking for portrait screens */
 @media (max-aspect-ratio: 1/1) {
-    .scoring-area, {
+    .scoring-area {
         flex-direction: column;
     }
+	.massvote .scoring-area {
+		/* but not for massvote */
+	    flex-direction: row;
+	}
 
     /* Remove alignment adjustments in vertical mode */
     .scoring-item:first-child,
     .scoring-item:last-child {
         justify-content: center;
-    }
-}
-.massvote @media (max-aspect-ratio: 1/1) {
-    .scoring-area, {
-        flex-direction: row;
     }
 }
 
@@ -745,6 +748,7 @@ if __name__ == "__main__":
 	parser.add_argument("-p", "--port", dest="port", default=9090, type=int, help="port to run the server on", metavar="PORTNUM")
 	parser.add_argument("-l", "--poolshrink", dest="poolshrink", default=50, type=int, help="k value for poolshrinking (disable with -1)", metavar="POOLSHRINK")
 	parser.add_argument("-s", "--session", dest="session", default=-1, type=int, help="number of image pairs to test before refilling the stack", metavar="SESSION")
+	parser.add_argument("-c", "--script", dest="script", default=None, type=str, help="optional script to inject into page headers for accessibility helpers", metavar="SCRIPT")
 	parser.add_argument("-d", "--dbname", dest="dbname", default="scores.shelf", type=str, help="name of ratings database file", metavar="NAME")
 	parser.add_argument("-r", "--prefilled", dest="prefilled", action="store_true", help="whether the ratings database file has been prepopulated")
 	parser.add_argument("-b", "--basedir", default=".", type=str, help="the folder to read files from if not using a prepopulated ratings database file", metavar="FOLDER")
@@ -755,6 +759,12 @@ if __name__ == "__main__":
 	
 	basedir = os.path.abspath(args.basedir)
 	itemcollection = Depletable_Stack(basedir, args.session, args.dbname, args.prefilled, args.poolshrink)
+
+	if args.script:
+		with open(args.script, 'rt') as fh:
+			script_text = fh.read()
+	else:
+		script_text = ''
 
 	cherry_config = {
 		'global': {
@@ -768,5 +778,5 @@ if __name__ == "__main__":
 			'tools.staticdir.dir': '/'
 		},
 	}
-	cherrypy.quickstart(Elo_Tournament(itemcollection, args.dbname), '/', config = cherry_config)
+	cherrypy.quickstart(Elo_Tournament(itemcollection, args.dbname, script_text), '/', config = cherry_config)
 
