@@ -66,7 +66,7 @@ def clean_shelf(preserved_keys: Set[str], filename: str) -> None:
 		for i in range(0, len(keys_to_remove), 900):
 			batch = keys_to_remove[i:i+900]
 			placeholders = ', '.join('?' for _ in batch)
-			cursor.execute(f'''DELETE FROM shelf_data WHERE key IN ({placeholders}))''')
+			cursor.execute(f'''DELETE FROM shelf_data WHERE key IN ({placeholders})''', tuple(batch))
 		conn.commit()
 		print(f'Pruned {len(keys_to_remove)} keys.')
 	except sqlite3.Error as e:
