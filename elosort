@@ -15,14 +15,27 @@ import sqlite3
 import sys
 
 STARTRATING = 1000
-TABLESCHEMA = '''CREATE TABLE IF NOT EXISTS shelf_data (key TEXT PRIMARY KEY, value REAL)'''
 
-def set_ratings(items: dict, filename: str) -> None:
+def setup_database(filename: str) -> None:
 	conn = sqlite3.connect(filename)
 	cursor = conn.cursor()
 	try:
-		cursor.execute(TABLESCHEMA)
-		cursor.executemany('''INSERT OR REPLACE INTO shelf_data (key, value) VALUES (?, ?)''', items.items())
+		cursor.execute('''CREATE TABLE IF NOT EXISTS shelf_data (key TEXT PRIMARY KEY, value REAL, ratings INTEGER DEFAULT 0)''')
+		conn.commit()
+	except sqlite3.Error as e:
+		print(f'SQLite error occurred during database setup: {e}')
+	finally:
+		conn.close()
+
+def set_ratings(items: dict, filename: str, changed: set) -> None:
+	if not changed:
+		return
+	setup_database(filename)
+	conn = sqlite3.connect(filename)
+	cursor = conn.cursor()
+	try:
+		vals = [(k, v, k) for k, v in items.items() if k in changed]
+		cursor.executemany('''INSERT OR REPLACE INTO shelf_data (key, value, ratings) VALUES (?, ?, COALESCE((SELECT ratings + 1 FROM shelf_data WHERE key = ?), 1))''', vals)
 		conn.commit()
 	except sqlite3.Error as e:
 		print(f'SQLite error occurred: {e}')
@@ -30,13 +43,11 @@ def set_ratings(items: dict, filename: str) -> None:
 		conn.close()
 
 def get_all_ratings(filename: str) -> List[Tuple[str, float]]:
+	setup_database(filename)
 	conn = sqlite3.connect(filename)
 	cursor = conn.cursor()
 	try:
-		cursor.execute(TABLESCHEMA)
-		conn.commit()
-
-		cursor.execute('''SELECT key, value FROM shelf_data ORDER BY value DESC''')
+		cursor.execute('''SELECT key, value, ratings FROM shelf_data ORDER BY value DESC''')
 		return cursor.fetchall()
 	except sqlite3.Error as e:
 		print(f'SQLite error occurred: {e}')
@@ -44,11 +55,10 @@ def get_all_ratings(filename: str) -> List[Tuple[str, float]]:
 		conn.close()
 
 def clean_shelf(preserved_keys: Set[str], filename: str) -> None:
+	setup_database(filename)
 	conn = sqlite3.connect(filename)
 	cursor = conn.cursor()
 	try:
-		cursor.execute(TABLESCHEMA)
-		conn.commit()
 		cursor.executemany('''INSERT OR IGNORE INTO shelf_data (key, value) VALUES(?, ?)''', [(k, STARTRATING) for k in preserved_keys])
 		conn.commit()
 
@@ -92,9 +102,9 @@ def migrate_shelf_to_sqlite(filename):
 	with shelve.open(str(file_path)) as shelf:
 		if not isinstance(shelf, shelve.Shelf):
 			raise ValueError(f"{filename} is not a valid shelf file.")
+		setup_database(str(sqlite_path))
 		conn = sqlite3.connect(str(sqlite_path))
 		cursor = conn.cursor()
-		cursor.execute(TABLESCHEMA)
 		cursor.executemany('''INSERT OR REPLACE INTO shelf_data (key, value) VALUES (?, ?)''', shelf.items())
 		conn.commit()
 		conn.close()
@@ -110,6 +120,7 @@ class Depletable_Stack:
 		self._dequeue_events = {}
 		self._dbl = db_location
 		self._session_length = session_length
+		self._item_count = 0
 
 		if not prefilled:
 			directory = Path(from_folder)
@@ -121,13 +132,27 @@ class Depletable_Stack:
 	def shuffle(self):
 		# get_all_ratings already sorts high to low
 		ratings = get_all_ratings(self._dbl)
+		self._item_count = len(ratings)
 		print(f'~~ ratings: {len(ratings)}')
 		if(self._poolshrink > 0):
 			p_pool_size = math.ceil(len(ratings) * (1 - (self._iteration / (self._iteration + self._poolshrink))))
 			if p_pool_size < len(ratings):
-				print(f'shrinking pool from {len(ratings)} to {p_pool_size}')
+				print(f'~~ shrinking pool from {len(ratings)} to {p_pool_size}')
 				ratings = ratings[:p_pool_size]
-		self._iteration += 1
+		
+		rating_events_min = min(x[2] for x in ratings)
+		rating_events_max = max(x[2] for x in ratings)
+		if rating_events_min != rating_events_max:
+			print(f'~~~ rating events diverged between {rating_events_min} and {rating_events_max}')
+			print(f'~~~ limiting pool to the less rated items and postponing iteration increment')
+			print(f'~~~ pool was {len(ratings)}')
+			underscored = [x for x in ratings if x[2] == rating_events_min]
+			if len(underscored) == 1:
+				underscored.append(random.choice(x for x in ratings if x[0] != underscored[0][0]))
+			ratings = underscored
+			print(f'~~~ pool now {len(ratings)}')
+		else:
+			self._iteration += 1
 		
 		tiers = {1: [], 2: [], 3: [], 4: []}
 		elo_min = min(x[1] for x in ratings)
@@ -182,8 +207,9 @@ class Depletable_Stack:
 			self._temporary_stack.remove(pair)
 
 class Elo_Tournament:
-	def __init__(self, items: Depletable_Stack, db_location: str, script_text: str = None):
+	def __init__(self, items: Depletable_Stack, db_location: str, top: float, script_text: str = ''):
 		self.items = items
+		self.top = top
 		self.script_text = script_text
 		self._dbl = db_location
 
@@ -204,15 +230,22 @@ class Elo_Tournament:
 		return (new_a_rating, new_b_rating)
 
 	def menu_div(self, tag: str = 'Clean URL and Continue Rating') -> str:
+		if self.top >= 1:
+			cutoff = self.top
+		else:
+			# a bit awkward
+			cutoff = round(self.top * len(self.items._item_count))
+
 		return f'''
 <div class="full-width-container">
-	<p align="center"><a href="/results">See Results</a> - <a href="/">{tag}</a> - <a href="/massvote">Mass Vote</a> - <a href="/script">Purge</a> - {self.items.stack_remaining()} remaining</p>
+	<p align="center"><a href="/results">See Results</a> - <a href="/">{tag}</a> - <a href="/massvote">Mass Vote</a> - <a href="/script?offset={cutoff}">Purge</a> - {self.items.stack_remaining()} remaining</p>
 </div>'''
 
 	@cherrypy.expose
 	def massvote(self, votes = []) -> str:
 		score_data = get_all_ratings(self._dbl)
-		ratings = {k:v for (k,v) in score_data}
+		ratings = {k:v for (k,v,r) in score_data}
+		changed = set()
 		ratings_dirty = False
 
 		if isinstance(votes, str):
@@ -230,14 +263,15 @@ class Elo_Tournament:
 			else:
 				continue
 			new_a_rating, new_b_rating = self.score_match(a, b, ratings, a_result, b_result)
-			ratings_dirty = True
+			changed.add(a)
+			changed.add(b)
 			ratings[a] = new_a_rating
 			ratings[b] = new_b_rating
 			self.items.dequeue((a, b))
 			self.items.dequeue((b, a))
 		
-		if ratings_dirty:
-			set_ratings(ratings, self._dbl)
+		if changed:
+			set_ratings(ratings, self._dbl, changed)
 
 		template = f'''<!DOCTYPE html>
 <html>
@@ -334,8 +368,8 @@ class Elo_Tournament:
 	@cherrypy.expose 
 	def index(self, a = None, b = None, result = None, force_im1 = None, force_im2 = None, count = None) -> str:
 		score_data = get_all_ratings(self._dbl)
-		ratings = {k:v for (k,v) in score_data}
-		ratings_dirty = False
+		ratings = {k:v for (k,v,r) in score_data}
+		changed = set()
 
 		if a and b and result:
 			try:
@@ -356,16 +390,17 @@ class Elo_Tournament:
 					# draw
 					a_result, b_result = 0.5, 0.5
 				new_a_rating, new_b_rating = self.score_match(a, b, ratings, a_result, b_result)
-				ratings_dirty = True
 				ratings[a] = new_a_rating
 				ratings[b] = new_b_rating
+				changed.add(a)
+				changed.add(b)
 				self.items.dequeue((a, b))
 				self.items.dequeue((b, a))
 			except ValueError as ve:
 				return f'ValueError: {repr(ve)}'
 
-		if ratings_dirty:
-			set_ratings(ratings, self._dbl)
+		if changed:
+			set_ratings(ratings, self._dbl, changed)
 
 		# we can now peek safely as the item is not dequeued until it is voted on
 		im1, im2 = self.items.peek()
@@ -468,19 +503,20 @@ class Elo_Tournament:
 	@cherrypy.expose
 	def results(self, start: int = 0, count: int = 0, switch_a: str = None, switch_b: str = None) -> str:
 		score_data = get_all_ratings(self._dbl)
-		ratings = {k:v for (k,v) in score_data}
-		ratings_dirty = False
+		ratings = {k:v for (k,v,r) in score_data}
+		changed = set()
 
 		if switch_a and switch_b:
 			old_a_rating = ratings.get(switch_a, STARTRATING)
 			old_b_rating = ratings.get(switch_b, STARTRATING)
+			changed.add(switch_a)
+			changed.add(switch_b)
 			ratings[switch_a] = old_b_rating
 			ratings[switch_b] = old_a_rating
 			score_data = sorted(ratings.items(), key=lambda x: x[1], reverse=True)
-			ratings_dirty = True
 
-		if ratings_dirty:
-			set_ratings(ratings, self._dbl)
+		if changed:
+			set_ratings(ratings, self._dbl, changed)
 
 		start = max(0, int(start))
 		count = max(0, int(count))
@@ -493,9 +529,15 @@ class Elo_Tournament:
 			results = score_data[:]
 
 		gallery_items = []
+
+		if self.top >= 1:
+			cutoff = self.top
+		else:
+			cutoff = round(self.top * len(results))
+
 		for index, x in enumerate(results):
 			element = wrap_media(x[0])
-			gallery_items.append(f'<div class="gallery-item {"prestige" if index < 20 else ""}">{element}<div class="score">Score: {x[1]:.3f}</div></div>')
+			gallery_items.append(f'<div class="gallery-item {"prestige" if index < cutoff else ""}">{element}<div class="score">Score: {x[1]:.3f}</div></div>')
 		gallery_string = '\n'.join(gallery_items)
 
 		template = f'''<!DOCTYPE html>
@@ -745,13 +787,14 @@ gallery-item div.score {
 if __name__ == "__main__":
 	global FILE_LOCATION
 	parser = ArgumentParser()
-	parser.add_argument("-p", "--port", dest="port", default=9090, type=int, help="port to run the server on", metavar="PORTNUM")
-	parser.add_argument("-l", "--poolshrink", dest="poolshrink", default=50, type=int, help="k value for poolshrinking (disable with -1)", metavar="POOLSHRINK")
-	parser.add_argument("-s", "--session", dest="session", default=-1, type=int, help="number of image pairs to test before refilling the stack", metavar="SESSION")
-	parser.add_argument("-c", "--script", dest="script", default=None, type=str, help="optional script to inject into page headers for accessibility helpers", metavar="SCRIPT")
-	parser.add_argument("-d", "--dbname", dest="dbname", default="scores.shelf", type=str, help="name of ratings database file", metavar="NAME")
-	parser.add_argument("-r", "--prefilled", dest="prefilled", action="store_true", help="whether the ratings database file has been prepopulated")
-	parser.add_argument("-b", "--basedir", default=".", type=str, help="the folder to read files from if not using a prepopulated ratings database file", metavar="FOLDER")
+	parser.add_argument('-p', '--port', dest='port', default=9090, type=int, help='port to run the server on', metavar='PORTNUM')
+	parser.add_argument('-l', '--poolshrink', dest='poolshrink', default=50, type=int, help='k value for poolshrinking (disable with -1)', metavar='POOLSHRINK')
+	parser.add_argument('-s', '--session', dest='session', default=-1, type=int, help='number of image pairs to test before refilling the stack', metavar='SESSION')
+	parser.add_argument('-t', '--top', dest='top', default=20, type=int, help='items to highlight, default for /script', metavar='TOP')
+	parser.add_argument('-c', '--script', dest='script', default=None, type=str, help='optional script to inject into page headers for accessibility helpers', metavar='SCRIPT')
+	parser.add_argument('-d', '--dbname', dest='dbname', default='scores.shelf', type=str, help='name of ratings database file', metavar='NAME')
+	parser.add_argument('-r', '--prefilled', dest='prefilled', action='store_true', help='whether the ratings database file has been prepopulated')
+	parser.add_argument('-b', '--basedir', default='.', type=str, help='the folder to read files from if not using a prepopulated ratings database file', metavar='FOLDER')
 
 	args = parser.parse_args()
 
@@ -778,5 +821,5 @@ if __name__ == "__main__":
 			'tools.staticdir.dir': '/'
 		},
 	}
-	cherrypy.quickstart(Elo_Tournament(itemcollection, args.dbname, script_text), '/', config = cherry_config)
+	cherrypy.quickstart(Elo_Tournament(itemcollection, args.dbname, args.top, script_text), '/', config = cherry_config)
 
