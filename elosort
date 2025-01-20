@@ -59,12 +59,19 @@ def clean_shelf(preserved_keys: Set[str], filename: str) -> None:
 	conn = sqlite3.connect(filename)
 	cursor = conn.cursor()
 	try:
-		cursor.executemany('''INSERT OR IGNORE INTO shelf_data (key, value) VALUES(?, ?)''', [(k, STARTRATING) for k in preserved_keys])
-		conn.commit()
+		if preserved_keys:
+			cursor.executemany('''INSERT OR IGNORE INTO shelf_data (key, value) VALUES(?, ?)''', [(k, STARTRATING) for k in preserved_keys])
+			conn.commit()
 
 		cursor.execute('SELECT key FROM shelf_data')
 		all_keys = {row[0] for row in cursor.fetchall()}
-		keys_to_remove = list(all_keys - preserved_keys)
+
+		keys_to_remove = []
+		for k in all_keys:
+			p_k = Path(k)
+			if not p_k.exists() or (preserved_keys and k not in preserved_keys):
+				keys_to_remove.append(k)
+		
 		if keys_to_remove:
 			print('About to remove the following keys from the database:')
 			for k in keys_to_remove:
@@ -126,6 +133,8 @@ class Depletable_Stack:
 			directory = Path(from_folder)
 			permanent_items = [str(file) for pattern in patterns for file in directory.rglob(pattern)]
 			clean_shelf(set(permanent_items), self._dbl)
+		else:
+			clean_shelf(set(), self._dbl)
 		
 		self.shuffle()
 
@@ -525,6 +534,8 @@ class Elo_Tournament:
 			results = score_data[start:]
 		elif start > 0 and count > 0:
 			results = score_data[start:start+count]
+		elif count > 0:
+			results = score_data[:count]
 		else:
 			results = score_data[:]
 
@@ -795,13 +806,22 @@ if __name__ == "__main__":
 	parser.add_argument('-d', '--dbname', dest='dbname', default='scores.shelf', type=str, help='name of ratings database file', metavar='NAME')
 	parser.add_argument('-r', '--prefilled', dest='prefilled', action='store_true', help='whether the ratings database file has been prepopulated')
 	parser.add_argument('-b', '--basedir', default='.', type=str, help='the folder to read files from if not using a prepopulated ratings database file', metavar='FOLDER')
+	parser.add_argument('-vo', '--videoonly', dest='video_only', action='store_true', help='whether to only include mp4 video in the files spidered')
+	parser.add_argument('-v', '--video', dest='video', action='store_true', help='whether to include mp4 video in the files spidered')
 
 	args = parser.parse_args()
+
+	if args.video_only:
+		extensions = ['*.mp4']
+	else:
+		extensions = ['*.jpg', '*.png', '*.gif']
+		if args.video:
+			extensions.append('*.mp4')
 
 	args.dbname = migrate_shelf_to_sqlite(args.dbname)
 	
 	basedir = os.path.abspath(args.basedir)
-	itemcollection = Depletable_Stack(basedir, args.session, args.dbname, args.prefilled, args.poolshrink)
+	itemcollection = Depletable_Stack(basedir, args.session, args.dbname, args.prefilled, args.poolshrink, patterns = extensions)
 
 	if args.script:
 		with open(args.script, 'rt') as fh:
